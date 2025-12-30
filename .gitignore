@@ -1,0 +1,19 @@
+# Old browser version file
+old_file.js
+
+# IDE files
+.idea/
+
+# Environment variables (sensitive data)
+.env
+
+# Logs
+logs/
+*.log
+
+# Reports
+reports/
+
+# Node modules (if any)
+node_modules/
+
