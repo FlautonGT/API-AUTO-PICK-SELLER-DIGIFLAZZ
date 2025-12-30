@@ -179,7 +179,26 @@ const api = {
             // Handle other non-200 errors
             if (!res.ok) {
                 const text = await res.text();
-                const errorMsg = `HTTP ${res.status}: ${text.substring(0, 100)}`;
+                const errorMsg = `HTTP ${res.status}: ${text.substring(0, 200)}`;
+                
+                // Check for KTP/PPh22 error (400) - seller mewajibkan KTP meski faktur: false
+                if (res.status === 400) {
+                    const errorLower = text.toLowerCase();
+                    const isKTPError = errorLower.includes('ktp') || 
+                                      errorLower.includes('pph22') || 
+                                      errorLower.includes('bukti potong') ||
+                                      errorLower.includes('verifikasi') ||
+                                      errorLower.includes('mewajibkan buyer');
+                    
+                    if (isKTPError) {
+                        // Return special error object untuk handle di processProductGroup
+                        const error = new Error(errorMsg);
+                        error.isKTPError = true;
+                        error.statusCode = 400;
+                        error.responseText = text;
+                        throw error;
+                    }
+                }
                 
                 // For 5xx errors, wait a bit before throwing
                 if (res.status >= 500) {
@@ -323,6 +342,16 @@ const filterSellers = (sellers) => {
         if (requireUnlimited && !s.unlimited_stock) return false;
         if (CONFIG.REQUIRE_MULTI && !s.multi) return false;
         if (CONFIG.REQUIRE_STATUS_ACTIVE && !s.status) return false;
+        
+        // Filter faktur: jika REQUIRE_FP = false, hanya ambil seller dengan faktur = false
+        // Ini penting karena ada seller yang faktur: false tapi tetap mewajibkan KTP
+        if (CONFIG.REQUIRE_FP === false && s.faktur === true) {
+            return false; // Skip seller yang pakai faktur jika kita tidak mau faktur
+        }
+        if (CONFIG.REQUIRE_FP === true && s.faktur === false) {
+            return false; // Skip seller yang tidak pakai faktur jika kita mau faktur
+        }
+        
         return true;
     });
 
@@ -481,8 +510,15 @@ const callGPTAPI = async (userMessage) => {
     return JSON.parse(content);
 };
 
-const getAISellers = async (sellers, productName, usedSellers = []) => {
-    const sellerData = sellers.map(s => ({
+const getAISellers = async (sellers, productName, usedSellers = [], excludeSellerIds = []) => {
+    // Filter out excluded sellers (yang bermasalah)
+    const availableSellers = sellers.filter(s => !excludeSellerIds.includes(s.id));
+    
+    if (availableSellers.length === 0) {
+        throw new Error('No sellers available after excluding problematic sellers');
+    }
+    
+    const sellerData = availableSellers.map(s => ({
         id: s.id,
         n: s.seller,
         p: s.price,
@@ -490,20 +526,30 @@ const getAISellers = async (sellers, productName, usedSellers = []) => {
         c: `${s.start_cut_off} - ${s.end_cut_off}`,
         h24: (s.start_cut_off === '00:00' && s.end_cut_off === '00:00') ? 1 : 0,
         d: (s.deskripsi || '-').substring(0, 100),
+        faktur: s.faktur || false, // Include faktur info
     }));
 
-    const userMessage = `PRODUCT: ${productName}
+    let userMessage = `PRODUCT: ${productName}
 NEED: 3 sellers
 
-SELLERS (id, n=name, p=price, r=rating, c=cutoff, h24=24jam, d=desc):
+SELLERS (id, n=name, p=price, r=rating, c=cutoff, h24=24jam, d=desc, faktur=true/false):
 ${JSON.stringify(sellerData)}
 
-AVOID: ${usedSellers.slice(-5).join(', ') || '-'}
+AVOID: ${usedSellers.slice(-5).join(', ') || '-'}`;
 
-Choose 3 DIFFERENT sellers with IDs.`;
+    // Add exclusion info if any
+    if (excludeSellerIds.length > 0) {
+        userMessage += `\n\nEXCLUDED SELLERS (JANGAN PILIH - bermasalah): ${excludeSellerIds.join(', ')}`;
+        userMessage += `\nPilih seller LAIN yang tidak bermasalah!`;
+    }
+
+    userMessage += `\n\nChoose 3 DIFFERENT sellers with IDs.`;
 
     log('  Asking AI for seller selection...', 'ai');
     log(`  📊 Sending ${sellerData.length} candidates to AI`, 'info');
+    if (excludeSellerIds.length > 0) {
+        log(`  ⚠️ Excluding ${excludeSellerIds.length} problematic seller(s)`, 'warning');
+    }
     
     const result = await retry(() => callGPTAPI(userMessage));
 
@@ -635,6 +681,198 @@ const generateProductCode = (productName, brandName = '') => {
 };
 
 // =============================================================================
+// AI PRODUCT CODE GENERATION (GROQ)
+// =============================================================================
+
+const SYSTEM_PROMPT_PRODUCT_CODE = `Kamu asisten generator kode produk PPOB. HANYA BALAS DENGAN JSON.
+
+TUGAS: Generate kode produk singkat berdasarkan KATEGORI, BRAND KATEGORI, BRAND, dan NAMA PRODUK.
+
+=== ATURAN DASAR ===
+- Maksimal 25 karakter (STRICT - tidak boleh lebih)
+- Hanya HURUF KAPITAL dan ANGKA (tanpa simbol, spasi, atau underscore)
+- Format: [BRAND][KATEGORI_SUFFIX][NOMINAL/UNIT][BRAND_KATEGORI]
+- Kode harus UNIK dan MUDAH DIBACA
+
+=== SINGKATAN BRAND (2-4 huruf) ===
+- TELKOMSEL → TSEL
+- INDOSAT → ISAT
+- XL → XL
+- AXIS → AXIS
+- TRI/THREE → TRI
+- SMARTFREN → SMFR
+- GOOGLE PLAY → GP
+- FREE FIRE → FF
+- MOBILE LEGENDS → ML atau MLBB
+- PUBG → PUBG
+- (Brand lain → ambil 2-4 huruf pertama yang mudah dikenali)
+
+=== FORMAT NOMINAL ===
+- Ribuan: Hilangkan 000, tanpa suffix K
+  - 5.000 / 5000 → 5
+  - 10.000 → 10
+  - 25.000 → 25
+  - 100.000 → 100
+- Puluhan ribu langsung: 15000 → 15, 50000 → 50
+- Ratusan ribu: 100000 → 100, 500000 → 500
+
+=== SUFFIX KATEGORI ===
+- Pulsa → (tidak ada suffix)
+  Contoh: TSEL5, ISAT10, XL25
+
+- Data → D + angka + G (untuk GB)
+  Contoh: TSELD1G, ISATD5G, XLD10G
+
+- Voucher → V atau VC
+  Contoh: GPV10, GPV50, GPV100
+
+- Game → sesuai unit game
+  - Diamond → DM (Contoh: ML86DM, FF100DM)
+  - UC → UC (Contoh: PUBG60UC)
+  - Coin → C (Contoh: HAGO100C)
+  - Jika tidak ada unit khusus → langsung nominal
+
+=== SUFFIX BRAND KATEGORI (jika bukan "Umum" atau "-") ===
+- UnlimitedMax → UM (max 2 huruf untuk hemat karakter)
+- Orbit → OB
+- Freedom → FM  
+- Conference → CF
+- Flash → FL
+- Combo → CB
+- (Lainnya → 2 huruf pertama)
+
+Penempatan: Di AKHIR kode
+Contoh: TSELD1GUM (Telkomsel Data 1GB UnlimitedMax)
+
+=== PRIORITAS JIKA > 10 KARAKTER ===
+Jika kombinasi melebihi 10 karakter, potong dengan prioritas:
+1. BRAND (wajib, 2-4 char)
+2. NOMINAL/UNIT (wajib)
+3. KATEGORI SUFFIX (D untuk data, V untuk voucher)
+4. BRAND KATEGORI (bisa disingkat 1-2 huruf atau dihilangkan)
+
+=== FORMAT RESPONSE ===
+
+{"code":"TSEL5","reasoning":"Telkomsel Pulsa 5rb"}
+
+HANYA balas dengan JSON di atas, tidak ada teks lain.`;
+
+const callGroqAPI = async (userMessage, systemPrompt, modelName) => {
+    if (!CONFIG.GROQ_API_KEY) {
+        throw new Error('GROQ_API_KEY not set');
+    }
+
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${CONFIG.GROQ_API_KEY}`
+        },
+        body: JSON.stringify({
+            model: modelName || 'llama-3.1-8b-instant',
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userMessage }
+            ],
+            temperature: 0.1,
+            max_tokens: 1000,
+            response_format: { type: "json_object" }
+        })
+    });
+
+    // Handle rate limit (429)
+    if (res.status === 429) {
+        log(`🚨 Groq API rate limit detected (429)`, 'error');
+        log(`⏸️  Sleeping for ${CONFIG.RATE_LIMIT_SLEEP_DURATION / 1000} seconds...`, 'warning');
+        await wait(CONFIG.RATE_LIMIT_SLEEP_DURATION);
+        log(`✅ Rate limit sleep completed, retrying...`, 'success');
+        return await callGroqAPI(userMessage, systemPrompt, modelName);
+    }
+
+    if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Groq API ${res.status}: ${err.substring(0, 100)}`);
+    }
+
+    const data = await res.json();
+    const content = data.choices[0]?.message?.content;
+
+    if (!content) throw new Error('Groq returned empty response');
+    return JSON.parse(content);
+};
+
+const sanitizeCode = (code) => {
+    if (!code) return '';
+    return code.replace(/[^A-Z0-9]/gi, '').toUpperCase().substring(0, 25);
+};
+
+const generateProductCodeAI = async (productName, brandName = '', categoryName = '', brandCategoryName = '', usedCodes = [], retryCount = 0) => {
+    if (!CONFIG.GROQ_API_KEY || !CONFIG.GROQ_MODEL_PRODUCT_CODE) {
+        log('⚠️ GROQ_API_KEY or GROQ_MODEL_PRODUCT_CODE not set, using script-based generation', 'warning');
+        return generateProductCode(productName, brandName);
+    }
+
+    const MAX_RETRIES = 3;
+
+    try {
+        // Build comprehensive user message with all context
+        let userMessage = `Product Name: ${productName}`;
+        if (brandName) userMessage += `\nBrand: ${brandName}`;
+        if (categoryName) userMessage += `\nKategori: ${categoryName}`;
+        if (brandCategoryName) userMessage += `\nBrand Kategori: ${brandCategoryName}`;
+
+        // Add info about used codes if this is a retry
+        if (usedCodes.length > 0) {
+            userMessage += `\n\nKODE YANG SUDAH DIPAKAI (JANGAN PAKAI INI): ${usedCodes.join(', ')}`;
+            userMessage += `\nGenerate kode BARU yang BERBEDA dan UNIK!`;
+        }
+
+        const logMsg = retryCount > 0
+            ? `🤖 Asking AI for product code (retry ${retryCount})...`
+            : `🤖 Asking AI for product code...`;
+        log(logMsg, 'ai');
+
+        const response = await callGroqAPI(userMessage, SYSTEM_PROMPT_PRODUCT_CODE, CONFIG.GROQ_MODEL_PRODUCT_CODE);
+        const result = typeof response === 'string' ? JSON.parse(response) : response;
+
+        if (!result.code) {
+            throw new Error('AI did not return a code');
+        }
+
+        const code = sanitizeCode(result.code);
+
+        // Validate code is not empty
+        if (!code || code.length === 0) {
+            throw new Error('AI returned empty code');
+        }
+
+        // Check if this code (or its variants with suffix) is already used
+        let isUsed = STATE.generatedCodes.has(code) || 
+                    STATE.generatedCodes.has(code + CONFIG.BACKUP1_SUFFIX) ||
+                    STATE.generatedCodes.has(code + CONFIG.BACKUP2_SUFFIX);
+
+        if (isUsed && retryCount < MAX_RETRIES) {
+            log(`⚠️ Code ${code} already used, retrying...`, 'warning');
+            const allUsedCodes = [...usedCodes, code];
+            return await generateProductCodeAI(productName, brandName, categoryName, brandCategoryName, allUsedCodes, retryCount + 1);
+        }
+
+        // If still duplicate after max retries, use script-based fallback
+        if (isUsed && retryCount >= MAX_RETRIES) {
+            log(`⚠️ AI retry limit reached, using fallback`, 'warning');
+            return generateProductCode(productName, brandName);
+        }
+
+        log(`🤖 AI Generated: ${code} (${result.reasoning || 'no reasoning'})`, 'ai');
+        return code;
+
+    } catch (e) {
+        log(`⚠️ AI code generation failed: ${e.message}, using fallback`, 'warning');
+        return generateProductCode(productName, brandName);
+    }
+};
+
+// =============================================================================
 // MAIN PROCESSING
 // =============================================================================
 
@@ -737,63 +975,144 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         if (seller.type === 'B1') code = baseCode + CONFIG.BACKUP1_SUFFIX;
         if (seller.type === 'B2') code = baseCode + CONFIG.BACKUP2_SUFFIX;
 
-        const postData = {
-            id: row.id,
-            code: code,
-            max_price: maxPrice,
-            product: row.product,
-            product_id: row.product_id,
-            product_details: row.product_details,
-            description: row.description,
-            price: seller.price,
-            stock: seller.stock || 0,
-            start_cut_off: seller.start_cut_off,
-            end_cut_off: seller.end_cut_off,
-            unlimited_stock: seller.unlimited_stock,
-            faktur: seller.faktur,
-            multi: seller.multi,
-            multi_counter: seller.multi_counter,
-            seller_sku_id: seller.id,
-            seller_sku_id_int: seller.id_int,
-            seller: seller.seller,
-            seller_details: seller.seller_details || {},
-            status: true,
-            last_update: row.last_update || '-',
-            status_sellerSku: seller.status_sellerSku,
-            sort_order: row.sort_order,
-            seller_sku_desc: seller.deskripsi || '-',
-            change: true,
-        };
-
         log(`\n  🔧 Processing row ${i + 1}/${rows.length} (${seller.type}):`, 'info');
         log(`     Code: ${code}`, 'info');
         log(`     Seller: ${seller.seller || seller.name}`, 'info');
         log(`     Price: ${formatRp(seller.price)}`, 'info');
         log(`     Max Price: ${formatRp(maxPrice)}`, 'info');
         log(`     Rating: ${seller.reviewAvg || seller.rating || 0}`, 'info');
+        log(`     Faktur: ${seller.faktur ? 'Ya' : 'Tidak'}`, 'info');
         log(`     Description: ${(seller.deskripsi || seller.description || '-').substring(0, 50)}...`, 'info');
         log(`     Cutoff: ${seller.start_cut_off || '00:00'} - ${seller.end_cut_off || '00:00'}`, 'info');
         
-        try {
-            log(`     💾 Saving to API...`, 'save');
-            await retry(() => api.saveProduct(postData));
-            log(`     ✅ Saved successfully!`, 'success');
+        let saveSuccess = false;
+        let retryCount = 0;
+        const maxRetriesForKTPError = 3;
+        let currentSeller = seller;
+        let problematicSellerIds = [];
 
-            STATE.processed.push({
-                product: productName,
-                category: categoryName,
-                type: seller.type,
-                code,
-                seller: seller.seller || seller.name,
-                price: seller.price,
-                maxPrice,
-                timestamp: getTimestamp(),
-            });
-            STATE.stats.success++;
-        } catch (e) {
-            log(`     ❌ Save failed: ${e.message}`, 'error');
-            STATE.errors.push({ product: productName, seller: seller.seller || seller.name, code, error: e.message });
-            STATE.stats.errors++;
+        while (!saveSuccess && retryCount < maxRetriesForKTPError) {
+            try {
+                if (retryCount > 0) {
+                    log(`     🔄 Retry attempt ${retryCount}/${maxRetriesForKTPError} with new seller...`, 'info');
+                    log(`     New Seller: ${currentSeller.seller || currentSeller.name} @ ${formatRp(currentSeller.price)}`, 'info');
+                } else {
+                    log(`     💾 Saving to API...`, 'save');
+                }
+                
+                const postData = {
+                    id: row.id,
+                    code: code,
+                    max_price: maxPrice,
+                    product: row.product,
+                    product_id: row.product_id,
+                    product_details: row.product_details,
+                    description: row.description,
+                    price: currentSeller.price,
+                    stock: currentSeller.stock || 0,
+                    start_cut_off: currentSeller.start_cut_off,
+                    end_cut_off: currentSeller.end_cut_off,
+                    unlimited_stock: currentSeller.unlimited_stock,
+                    faktur: currentSeller.faktur || false, // Pastikan faktur sesuai seller
+                    multi: currentSeller.multi,
+                    multi_counter: currentSeller.multi_counter,
+                    seller_sku_id: currentSeller.id,
+                    seller_sku_id_int: currentSeller.id_int,
+                    seller: currentSeller.seller,
+                    seller_details: currentSeller.seller_details || {},
+                    status: true,
+                    last_update: row.last_update || '-',
+                    status_sellerSku: currentSeller.status_sellerSku,
+                    sort_order: row.sort_order,
+                    seller_sku_desc: currentSeller.deskripsi || '-',
+                    change: true,
+                };
+
+                await retry(() => api.saveProduct(postData));
+                log(`     ✅ Saved successfully!`, 'success');
+                saveSuccess = true;
+
+                STATE.processed.push({
+                    product: productName,
+                    category: categoryName,
+                    type: currentSeller.type || seller.type,
+                    code,
+                    seller: currentSeller.seller || currentSeller.name,
+                    price: currentSeller.price,
+                    maxPrice,
+                    timestamp: getTimestamp(),
+                });
+                STATE.stats.success++;
+                
+            } catch (e) {
+                // Check if it's KTP/PPh22 error (400)
+                if (e.isKTPError && e.statusCode === 400) {
+                    log(`     ⚠️ Seller "${currentSeller.seller || currentSeller.name}" requires KTP/PPh22 verification`, 'warning');
+                    log(`     🔄 Requesting AI to replace problematic seller...`, 'info');
+                    
+                    // Add problematic seller to exclusion list
+                    problematicSellerIds.push(currentSeller.id);
+                    
+                    // Get fresh sellers list
+                    let freshSellers;
+                    try {
+                        freshSellers = await retry(() => api.getSellers(rows[0].id));
+                        freshSellers = filterSellers(freshSellers);
+                    } catch (err) {
+                        log(`     ❌ Failed to get fresh sellers: ${err.message}`, 'error');
+                        throw e; // Re-throw original error
+                    }
+                    
+                    // Prepare candidates excluding problematic sellers
+                    const freshCandidates = prepareSellersForAI(freshSellers);
+                    const usedKey = `${categoryName}-${brandName}`;
+                    const usedList = STATE.usedSellers.get(usedKey) || [];
+                    
+                    // Ask AI to replace problematic seller
+                    try {
+                        const replacementResult = await getAISellers(
+                            freshCandidates, 
+                            productName, 
+                            usedList, 
+                            problematicSellerIds
+                        );
+                        
+                        // Find replacement for the same type (MAIN, B1, or B2)
+                        const sellerType = currentSeller.type || seller.type;
+                        const replacement = replacementResult.find(s => s.type === sellerType);
+                        
+                        if (!replacement) {
+                            log(`     ❌ No replacement found for ${sellerType}`, 'error');
+                            throw e; // Re-throw original error
+                        }
+                        
+                        log(`     ✅ AI selected replacement: ${replacement.seller || replacement.name} @ ${formatRp(replacement.price)}`, 'success');
+                        currentSeller = replacement;
+                        retryCount++;
+                        
+                        // Update used sellers
+                        if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
+                        STATE.usedSellers.get(usedKey).push(replacement.seller || replacement.name);
+                        
+                        await wait(1000); // Wait before retry
+                        continue; // Retry with new seller
+                        
+                    } catch (aiErr) {
+                        log(`     ❌ AI replacement failed: ${aiErr.message}`, 'error');
+                        throw e; // Re-throw original error
+                    }
+                } else {
+                    // Other errors - just throw
+                    log(`     ❌ Save failed: ${e.message}`, 'error');
+                    STATE.errors.push({ product: productName, seller: currentSeller.seller || currentSeller.name, code, error: e.message });
+                    STATE.stats.errors++;
+                    break; // Exit retry loop
+                }
+            }
+        }
+        
+        if (!saveSuccess) {
+            log(`     ❌ Failed after ${retryCount} retry attempts`, 'error');
         }
 
         await wait(CONFIG.DELAY_BETWEEN_SAVES);

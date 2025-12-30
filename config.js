@@ -43,12 +43,10 @@ export const CONFIG = {
     // =============================================================================
     MIN_RATING: parseNum(process.env.MIN_RATING, 3.0),
     MIN_RATING_PREFILTER: parseNum(process.env.MIN_RATING_PREFILTER, 3.0),
-    REQUIRE_UNLIMITED_STOCK: parseBool(process.env.REQUIRE_UNLIMITED_STOCK, true),
-    REQUIRE_UNLIMITED: parseBool(process.env.REQUIRE_UNLIMITED, parseBool(process.env.REQUIRE_UNLIMITED_STOCK, true)), // Alias, fallback ke REQUIRE_UNLIMITED_STOCK
+    REQUIRE_UNLIMITED_STOCK: parseBool(process.env.REQUIRE_UNLIMITED_STOCK || process.env.REQUIRE_UNLIMITED, true),
     REQUIRE_MULTI: parseBool(process.env.REQUIRE_MULTI, true),
     REQUIRE_STATUS_ACTIVE: parseBool(process.env.REQUIRE_STATUS_ACTIVE, true),
     REQUIRE_FP: parseBool(process.env.REQUIRE_FP, false),
-    PREFER_NO_FAKTUR: parseBool(process.env.PREFER_NO_FAKTUR, true),
     ENABLE_DESCRIPTION_BLACKLIST: parseBool(process.env.ENABLE_DESCRIPTION_BLACKLIST, true),
     ENABLE_RATING_PREFILTER: parseBool(process.env.ENABLE_RATING_PREFILTER, true),
     LOG_FILTERED_SELLERS: parseBool(process.env.LOG_FILTERED_SELLERS, false),
@@ -84,7 +82,6 @@ export const CONFIG = {
     // =============================================================================
     ENABLE_SMART_RETRY: parseBool(process.env.ENABLE_SMART_RETRY, true),
     MAX_RETRIES: process.env.MAX_RETRIES === 'Infinity' ? Infinity : parseNum(process.env.MAX_RETRIES, 15),
-    RETRY_DELAY: parseNum(process.env.RETRY_DELAY, 1000),
     RETRY_DELAY_MIN: parseNum(process.env.RETRY_DELAY_MIN, 1500),
     RETRY_DELAY_MAX: parseNum(process.env.RETRY_DELAY_MAX, 2000),
     RETRY_EXPONENTIAL_BACKOFF: parseBool(process.env.RETRY_EXPONENTIAL_BACKOFF, false),
@@ -104,22 +101,12 @@ export const CONFIG = {
     // =============================================================================
     MAX_AI_CANDIDATES: parseNum(process.env.MAX_AI_CANDIDATES, 20),
     MIN_DESCRIPTION_LENGTH: parseNum(process.env.MIN_DESCRIPTION_LENGTH, 15),
-    // DESCRIPTION_BLACKLIST is primary, BLACKLIST_KEYWORDS is alias for backward compatibility
     DESCRIPTION_BLACKLIST: parseArray(
         process.env.DESCRIPTION_BLACKLIST || process.env.BLACKLIST_KEYWORDS,
         [
             'testing', 'test', 'sedang testing', 'testing bersama admin', 'sedang testing bersama admin', 'test bersama admin',
             'percobaan', 'trial', 'demo', 'maintenance', 'under construction',
             'pulsa transfer', 'paket transfer'
-        ]
-    ),
-    // Alias for backward compatibility
-    BLACKLIST_KEYWORDS: parseArray(
-        process.env.BLACKLIST_KEYWORDS || process.env.DESCRIPTION_BLACKLIST,
-        [
-            'testing', 'test', 'sedang testing', 'test bersama admin',
-            'testing bersama admin', 'sedang testing bersama admin', 'percobaan', 'trial', 'demo',
-            'maintenance', 'under construction', 'pulsa transfer', 'paket transfer'
         ]
     ),
 
@@ -161,7 +148,7 @@ export const printConfig = () => {
     console.log(`   GPT Model: ${CONFIG.GPT_MODEL} (Seller Selection)`);
     console.log(`   Groq Model: ${CONFIG.GROQ_MODEL_PRODUCT_CODE || 'NOT SET (will use fallback)'} (Product Code)`);
     console.log(`   Min Rating: ${CONFIG.MIN_RATING} (Pre-filter: ${CONFIG.MIN_RATING_PREFILTER})`);
-    console.log(`   Require Unlimited: ${CONFIG.REQUIRE_UNLIMITED_STOCK || CONFIG.REQUIRE_UNLIMITED}`);
+    console.log(`   Require Unlimited: ${CONFIG.REQUIRE_UNLIMITED_STOCK}`);
     console.log(`   Require Multi: ${CONFIG.REQUIRE_MULTI}`);
     console.log(`   Require Status Active: ${CONFIG.REQUIRE_STATUS_ACTIVE}`);
     console.log(`   Skip Categories: ${CONFIG.SKIP_CATEGORIES.length}`);
