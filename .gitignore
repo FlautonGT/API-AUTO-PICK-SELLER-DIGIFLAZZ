@@ -11,9 +11,6 @@ old_file.js
 logs/
 *.log
 
-# Reports
-reports/
-
 # Node modules (if any)
 node_modules/
 
