@@ -1,28 +1,37 @@
 # 🚀 Digiflazz AI Seller Picker v5.0
 
-Otomasi pemilihan seller Digiflazz menggunakan AI (GPT-4.1-mini). Langsung via API tanpa browser.
+Otomasi pemilihan seller Digiflazz menggunakan AI (GPT-4.1-mini + Groq). Langsung via API tanpa browser - **10-50x lebih cepat** dari versi browser.
 
 ## ✨ Fitur
 
-- ⚡ **Direct API** - Tidak perlu browser, 10-50x lebih cepat
-- 🤖 **AI-Powered** - GPT-4.1-mini untuk pemilihan seller optimal
-- 🔍 **Smart Filtering** - Pre-filter seller sebelum AI (hemat token)
-- 🏷️ **Auto Product Code** - Generate kode produk otomatis (TSEL5, TSEL5B1, TSEL5B2)
-- 📊 **Logging & Report** - Log harian + report JSON/TXT
-- 🔄 **Auto Retry** - Retry otomatis jika gagal
-- ⚙️ **Configurable** - Semua setting di file `.env`
+- ⚡ **Direct API** - Tidak perlu browser, 10-50x lebih cepat dari DOM scraping
+- 🤖 **AI-Powered Seller Selection** - GPT-4.1-mini untuk pemilihan seller optimal dengan reasoning
+- 🏷️ **AI Product Code Generation** - Groq API untuk generate kode produk context-aware (TSEL5, TSELD1G, TSEL1GUMAX)
+- 🔍 **Smart Pre-Filtering** - Blacklist deskripsi, rating filter, stock/multi filter sebelum AI (hemat token)
+- 📊 **Verbose Logging** - Log detail setiap step: seller yang dipilih, AI reasoning, code generation, dll
+- 🔄 **Smart Retry** - Auto retry dengan exponential backoff, never give up
+- 🚨 **Rate Limit Detection** - Auto-detect 429 error, sleep 15 detik, auto-resume
+- 📁 **File Logging & Reports** - Log harian + report JSON/TXT otomatis
+- ⚙️ **Fully Configurable** - Semua setting di file `.env`
+- 🎯 **100% Feature Parity** - Sama dengan versi browser (old_file.js), hanya beda cara akses data
 
 ## 📋 Requirements
 
 - **Node.js** v18+ ([Download](https://nodejs.org/))
-- **OpenAI API Key** ([Get API Key](https://platform.openai.com/api-keys))
+- **OpenAI API Key** ([Get API Key](https://platform.openai.com/api-keys)) - Untuk seller selection
+- **Groq API Key** ([Get API Key](https://console.groq.com/keys)) - Untuk product code generation
 - **Digiflazz Account** (Member area access)
 
 ## 🛠️ Instalasi
 
-### 1. Download & Extract
+### 1. Clone Repository
 
-Extract file zip ke folder, contoh: `C:\digiflazz-picker\`
+```bash
+git clone https://github.com/FlautonGT/API-AUTO-PICK-SELLER-DIGIFLAZZ.git
+cd API-AUTO-PICK-SELLER-DIGIFLAZZ
+```
+
+Atau download ZIP dan extract ke folder, contoh: `C:\digiflazz-picker\`
 
 ### 2. Buat File `.env`
 
@@ -220,13 +229,11 @@ RATE_LIMIT_CHECK_INTERVAL=500
 
 ### 4. Install Dependencies
 
-Double-click `start.bat` (otomatis install saat pertama kali)
-
-Atau manual via CMD:
-```cmd
-cd C:\digiflazz-picker
+```bash
 npm install
 ```
+
+Atau double-click `start.bat` (otomatis install saat pertama kali)
 
 ## 🚀 Cara Pakai
 
@@ -263,9 +270,11 @@ node index.js --help
 
 | Variable | Keterangan |
 |----------|------------|
-| `XSRF_TOKEN` | Token dari browser DevTools |
-| `COOKIE` | Cookie dari browser DevTools |
-| `GPT_API_KEY` | API Key OpenAI |
+| `XSRF_TOKEN` | Token dari browser DevTools (Network > Headers) |
+| `COOKIE` | Cookie dari browser DevTools (Network > Headers) |
+| `GPT_API_KEY` | API Key OpenAI untuk seller selection |
+| `GROQ_API_KEY` | API Key Groq untuk product code generation |
+| `GROQ_MODEL_PRODUCT_CODE` | Model Groq (contoh: `llama-3.1-8b-instant`) |
 
 ### Filter Seller
 
@@ -284,21 +293,28 @@ node index.js --help
 | `SKIP_CATEGORIES` | `Malaysia TOPUP,...` | Kategori yang di-skip |
 | `CATEGORIES` | _(kosong)_ | Kategori yang diproses (kosong = semua) |
 
-### Timing
+### Timing & Retry
 
 | Variable | Default | Keterangan |
 |----------|---------|------------|
 | `DELAY_BETWEEN_SAVES` | `250` | Delay antar save (ms) |
 | `DELAY_BETWEEN_PRODUCTS` | `100` | Delay antar produk (ms) |
-| `MAX_RETRIES` | `3` | Max retry per operasi |
+| `ENABLE_SMART_RETRY` | `true` | Enable smart retry mechanism |
+| `MAX_RETRIES` | `15` | Max retry per operasi (atau `Infinity`) |
+| `RETRY_DELAY_MIN` | `1500` | Min delay antar retry (ms) |
+| `RETRY_DELAY_MAX` | `2000` | Max delay antar retry (ms) |
+| `RATE_LIMIT_SLEEP_DURATION` | `15000` | Sleep saat kena rate limit 429 (ms) |
 
 ### AI Settings
 
 | Variable | Default | Keterangan |
 |----------|---------|------------|
-| `GPT_MODEL` | `gpt-4.1-mini` | Model OpenAI |
-| `MAX_AI_CANDIDATES` | `20` | Max seller dikirim ke AI |
-| `BLACKLIST_KEYWORDS` | `testing,test,...` | Keyword blacklist di deskripsi |
+| `GPT_MODEL` | `gpt-4.1-mini` | Model OpenAI untuk seller selection |
+| `GROQ_MODEL_PRODUCT_CODE` | `llama-3.1-8b-instant` | Model Groq untuk product code generation |
+| `MAX_AI_CANDIDATES` | `20` | Max seller dikirim ke AI (hemat token) |
+| `DESCRIPTION_BLACKLIST` | `testing,test,...` | Keyword blacklist di deskripsi seller |
+| `ENABLE_DESCRIPTION_BLACKLIST` | `true` | Enable/disable blacklist filter |
+| `ENABLE_RATING_PREFILTER` | `true` | Enable/disable rating pre-filter |
 
 ## 📁 Output
 
@@ -319,53 +335,152 @@ digiflazz-picker/
 ════════════════════════════════════════════════════════════
 
 [14:30:46] 🌐 Fetching categories...
-[14:30:47] ℹ️  Loaded: 22 categories, 156 brands
+[14:30:47] ℹ️  Loaded: 22 categories, 156 brands, 45 types
 
 ════════════════════════════════════════════════════════════
 [14:30:47] 📁 Category: Pulsa
 ────────────────────────────────────────
 
-[14:30:48] 📦 Telkomsel 2.000 (3 rows)
-[14:30:48] ℹ️    Total sellers: 156
-[14:30:48] 🔍   Filtered: 156 → 89 sellers
-[14:30:49] 🤖   Asking AI...
-[14:30:50] 🤖   AI: MAIN=BAHIYYA PULSA, B1=Payfast ID, B2=RUMAH KOMUNIKA
-[14:30:50] ✅   MAIN: TSEL2 → BAHIYYA PULSA @ Rp 2.125
-[14:30:51] ✅   B1: TSEL2B1 → Payfast ID @ Rp 2.430
-[14:30:51] ✅   B2: TSEL2B2 → RUMAH KOMUNIKA @ Rp 2.950
+════════════════════════════════════════════════════════════
+[14:30:48] 📦 Processing: Telkomsel 2.000
+   📍 Location: Pulsa > TELKOMSEL
+   📊 Rows: 3
+  🔍 Fetching sellers from API...
+  ✅ Got 156 total sellers from API
+  📋 Before filter: 156 sellers
+  📋 After blacklist filter: 142 sellers (removed 14)
+  📋 After rating filter: 89 sellers (removed 53)
+  📋 After stock/multi filter: 67 sellers (removed 22)
+  🎯 Prepared 20 candidates for AI
+     Top candidates: BAHIYYA PULSA@Rp 2.125, Payfast ID@Rp 2.430, ...
+  🤖 Asking AI for seller selection...
+  📊 Sending 20 candidates to AI
+  🤖 AI Reasoning: MAIN dipilih karena harga termurah dan deskripsi menyebut nasional. B1 dipilih karena rating tertinggi. B2 dipilih karena 24 jam operasional.
+  ✅ AI selected 3 seller(s):
+     1. MAIN: BAHIYYA PULSA @ Rp 2.125
+     2. B1: Payfast ID @ Rp 2.430
+     3. B2: RUMAH KOMUNIKA @ Rp 2.950
+  ✓ Enriched seller MAIN: BAHIYYA PULSA @ Rp 2.125 (Rating: 4.8)
+  ✓ Enriched seller B1: Payfast ID @ Rp 2.430 (Rating: 4.9)
+  ✓ Enriched seller B2: RUMAH KOMUNIKA @ Rp 2.950 (Rating: 4.7)
+  📋 Final sellers: MAIN=BAHIYYA PULSA@Rp 2.125, B1=Payfast ID@Rp 2.430, B2=RUMAH KOMUNIKA@Rp 2.950
+  ✅ Selected 3 seller(s) for 3 row(s)
+  💰 Max price calculated: Rp 3.098 (from seller prices: Rp 2.125, Rp 2.430, Rp 2.950)
+  🏷️ Generating product code...
+     Context: Category=Pulsa, Brand=TELKOMSEL, BrandCategory=Umum
+  🤖 Asking AI for product code...
+  🤖 AI Generated: TSEL2 (Telkomsel Pulsa 2rb)
+     ✅ AI generated code: TSEL2
+  📝 Code allocation plan:
+     Row 1 (MAIN): TSEL2
+     Row 2 (B1): TSEL2B1
+     Row 3 (B2): TSEL2B2
+
+  🔧 Processing row 1/3 (MAIN):
+     Code: TSEL2
+     Seller: BAHIYYA PULSA
+     Price: Rp 2.125
+     Max Price: Rp 3.098
+     Rating: 4.8
+     Description: Stok sendiri, nasional, proses cepat...
+     Cutoff: 00:00 - 00:00
+     💾 Saving to API...
+     ✅ Saved successfully!
+
+  🔧 Processing row 2/3 (B1):
+     Code: TSEL2B1
+     Seller: Payfast ID
+     Price: Rp 2.430
+     Max Price: Rp 3.098
+     Rating: 4.9
+     Description: Terpercaya, valid 100%, garansi...
+     Cutoff: 00:00 - 00:00
+     💾 Saving to API...
+     ✅ Saved successfully!
+
+  🔧 Processing row 3/3 (B2):
+     Code: TSEL2B2
+     Seller: RUMAH KOMUNIKA
+     Price: Rp 2.950
+     Max Price: Rp 3.098
+     Rating: 4.7
+     Description: 24 jam operasional, stok terjamin...
+     Cutoff: 00:00 - 00:00
+     💾 Saving to API...
+     ✅ Saved successfully!
+
+  ✅ Completed: Telkomsel 2.000
+     Processed: 3/3 rows
+════════════════════════════════════════════════════════════
 
 ════════════════════════════════════════════════════════════
 [14:45:30] 🏁 COMPLETED!
 [14:45:30] ⏱️    Duration: 14m 45s
 [14:45:30] ℹ️    Total: 2541 | Success: 2489 | Skip: 32 | Error: 20
 [14:45:30] ℹ️    Success Rate: 97.95%
+[14:45:30] ℹ️    AI Calls: 523 | API Calls: 3124
 ════════════════════════════════════════════════════════════
 ```
 
 ## 🤖 Logika Pemilihan Seller
 
-### MAIN (Seller Utama)
+### Pre-Filtering (Sebelum AI)
+1. **Blacklist Filter** - Filter seller dengan deskripsi:
+   - `testing`, `test bersama admin`, `sedang testing`, `percobaan`, `trial`, `demo`, `maintenance`
+   - `pulsa transfer`, `paket transfer` (bukan stok sendiri)
+   - Deskripsi < 15 karakter atau hanya nama produk
+   - Deskripsi kosong atau hanya "-"
+
+2. **Rating Filter** - Filter seller dengan rating < 3.0 (rating 0 = belum ada rating, OK)
+
+3. **Stock & Multi Filter** - Filter berdasarkan:
+   - `REQUIRE_UNLIMITED_STOCK` - Wajib stok unlimited
+   - `REQUIRE_MULTI` - Wajib support multi transaksi
+   - `REQUIRE_STATUS_ACTIVE` - Wajib status aktif
+
+4. **Fallback** - Jika terlalu sedikit seller, relax filter (hanya blacklist)
+
+### AI Selection (Setelah Pre-Filter)
+
+#### MAIN (Seller Utama)
 - Harga **TERMURAH** dari yang lolos filter
 - Deskripsi menyebut: nasional / speed / stok
 - Rating >= 3.0 atau 0 (belum ada rating)
 
-### B1 (Backup Stabilitas)
+#### B1 (Backup Stabilitas)
 - Nama **BERBEDA** dari MAIN
-- Rating **TERTINGGI**
+- Rating **TERTINGGI** (>= 3.0 atau 0)
 - Deskripsi lengkap & profesional
+- Harga boleh lebih mahal dari MAIN (wajar untuk kualitas)
 
-### B2 (Backup 24 Jam)
+#### B2 (Backup 24 Jam)
 - **WAJIB** 24 jam (`start_cut_off = 00:00` DAN `end_cut_off = 00:00`)
 - Nama **BERBEDA** dari MAIN & B1
-- Deskripsi bagus (bukan testing/trial)
+- **WAJIB** lolos blacklist (testing/trial tetap dilarang meski 24 jam)
+- Deskripsi bagus > harga termurah
+- Rating tertinggi (>= 3.0 atau 0)
 
-### Blacklist Otomatis
-Seller dengan deskripsi berikut akan di-skip:
-- `testing`, `test bersama admin`, `sedang testing`
-- `percobaan`, `trial`, `demo`, `maintenance`
-- `pulsa transfer`, `paket transfer`
-- Deskripsi < 15 karakter
-- Deskripsi hanya nama produk (contoh: "telkomsel 2000")
+### AI Reasoning
+Setiap pemilihan seller, AI akan memberikan **reasoning** mengapa seller tersebut dipilih. Reasoning ini ditampilkan di console log untuk transparansi.
+
+## 🏷️ Product Code Generation
+
+### AI-Powered (Groq)
+- Context-aware: mempertimbangkan **Kategori**, **Brand Kategori**, dan **Brand**
+- Contoh:
+  - `Telkomsel 5.000` (Pulsa, Umum) → `TSEL5`
+  - `Telkomsel 1GB` (Data, Umum) → `TSELD1G`
+  - `Telkomsel 1GB` (Data, UnlimitedMax) → `TSEL1GUMAX`
+  - `Telkomsel 1GB` (Data, Orbit) → `TSEL1GORB`
+
+### Auto-Retry
+- Jika kode sudah dipakai → AI retry generate kode baru (max 3x)
+- Jika masih duplicate → Fallback ke script-based dengan unique suffix
+
+### Code Allocation
+- Row 1 → `TSEL5` (MAIN)
+- Row 2 → `TSEL5B1` (B1)
+- Row 3 → `TSEL5B2` (B2)
 
 ## ❓ Troubleshooting
 
@@ -377,9 +492,10 @@ Seller dengan deskripsi berikut akan di-skip:
 - Token/Cookie expired
 - Ambil ulang token dari browser
 
-### Error: "GPT API 429"
-- Rate limit OpenAI
-- Tunggu beberapa menit dan coba lagi
+### Error: "GPT API 429" atau "Groq API 429"
+- Rate limit dari OpenAI/Groq
+- Script akan **otomatis sleep 15 detik** dan retry
+- Jika masih error, tunggu beberapa menit dan coba lagi
 
 ### Seller tidak ditemukan
 - Pastikan filter tidak terlalu ketat
@@ -387,18 +503,41 @@ Seller dengan deskripsi berikut akan di-skip:
 
 ## 📝 Changelog
 
-### v5.0.0
-- Initial release
-- Direct API (tanpa browser)
-- AI-powered seller selection
-- Pre-filtering sebelum AI
-- Auto product code generation
-- File logging & reports
+### v5.0.0 (Current)
+- ✅ Initial release - API version
+- ✅ Direct API calls (tanpa browser, 10-50x lebih cepat)
+- ✅ AI-powered seller selection (GPT-4.1-mini) dengan reasoning
+- ✅ AI product code generation (Groq) context-aware
+- ✅ Smart pre-filtering (blacklist, rating, stock/multi) sebelum AI
+- ✅ Rate limit detection & auto-handle (429 error)
+- ✅ Smart retry mechanism dengan exponential backoff
+- ✅ Verbose logging (seller details, AI reasoning, code generation)
+- ✅ File logging & reports (JSON + TXT)
+- ✅ 100% feature parity dengan versi browser (old_file.js)
+
+### Perbedaan dengan Versi Browser
+| Feature | Browser Version | API Version |
+|---------|----------------|-------------|
+| Akses Data | DOM Scraping | Direct API |
+| Speed | Normal | 10-50x lebih cepat |
+| Platform | Browser Console | Node.js CMD |
+| Search Feature | Ada (USE_SEARCH) | Tidak perlu (API langsung) |
+| Pagination | Manual | Tidak perlu (API langsung) |
+| Logika Core | ✅ | ✅ (Sama 100%) |
 
 ## 📄 License
 
 MIT License - Free to use and modify.
 
+## 🔗 Links
+
+- **Repository**: [https://github.com/FlautonGT/API-AUTO-PICK-SELLER-DIGIFLAZZ.git](https://github.com/FlautonGT/API-AUTO-PICK-SELLER-DIGIFLAZZ.git)
+- **Issues**: [Report Bug](https://github.com/FlautonGT/API-AUTO-PICK-SELLER-DIGIFLAZZ/issues)
+
 ## 👨‍💻 Author
 
-Created by **Claude AI** for **Riko**
+Created by **Flauton**
+
+---
+
+**⭐ Jika project ini membantu, jangan lupa star repository ini! ⭐**
