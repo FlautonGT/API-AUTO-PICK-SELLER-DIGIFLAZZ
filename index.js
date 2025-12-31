@@ -395,7 +395,11 @@ const filterSellers = (sellers) => {
     return filtered;
 };
 
-const prepareSellersForAI = (sellers) => {
+const prepareSellersForAI = (sellers, minCandidates = 3) => {
+    // Determine minimum candidates needed
+    // If sellers >= 3, send at least 3. If sellers < 3, send what's available
+    const actualMin = sellers.length >= 3 ? Math.max(minCandidates, 3) : sellers.length;
+    
     const sorted = [...sellers].sort((a, b) => a.price - b.price);
     const cheapest = sorted.slice(0, 10);
     const highRated = [...sellers]
@@ -411,7 +415,23 @@ const prepareSellersForAI = (sellers) => {
         if (!map.has(s.id)) map.set(s.id, s);
     });
 
-    return Array.from(map.values()).slice(0, CONFIG.MAX_AI_CANDIDATES);
+    const candidates = Array.from(map.values());
+    
+    // Ensure minimum candidates: if sellers >= 3, send at least 3
+    // If we have less than minCandidates, add more from sorted list
+    if (candidates.length < actualMin && sellers.length >= actualMin) {
+        // Add more sellers from sorted list to reach minimum
+        for (const s of sorted) {
+            if (!map.has(s.id)) {
+                map.set(s.id, s);
+                candidates.push(s);
+                if (candidates.length >= actualMin) break;
+            }
+        }
+    }
+    
+    // Return at least actualMin candidates (or all if less), but cap at MAX_AI_CANDIDATES
+    return candidates.slice(0, Math.max(actualMin, Math.min(candidates.length, CONFIG.MAX_AI_CANDIDATES)));
 };
 
 // =============================================================================
@@ -533,7 +553,7 @@ const callGPTAPI = async (userMessage) => {
     return JSON.parse(content);
 };
 
-const getAISellers = async (sellers, productName, usedSellers = [], excludeSellerIds = []) => {
+const getAISellers = async (sellers, productName, usedSellers = [], excludeSellerIds = [], neededSellers = 3) => {
     // Filter out excluded sellers (yang bermasalah)
     const availableSellers = sellers.filter(s => !excludeSellerIds.includes(s.id));
     
@@ -551,9 +571,9 @@ const getAISellers = async (sellers, productName, usedSellers = [], excludeSelle
         d: (s.deskripsi || '-').substring(0, 100),
         faktur: s.faktur || false, // Include faktur info
     }));
-
+    
     let userMessage = `PRODUCT: ${productName}
-NEED: 3 sellers
+NEED: ${neededSellers} seller(s)
 
 SELLERS (id, n=name, p=price, r=rating, c=cutoff, h24=24jam, d=desc, faktur=true/false):
 ${JSON.stringify(sellerData)}
@@ -566,7 +586,13 @@ AVOID: ${usedSellers.slice(-5).join(', ') || '-'}`;
         userMessage += `\nPilih seller LAIN yang tidak bermasalah!`;
     }
 
-    userMessage += `\n\nChoose 3 DIFFERENT sellers with IDs.`;
+    if (neededSellers === 1) {
+        userMessage += `\n\nChoose 1 seller (MAIN only) with ID.`;
+    } else if (neededSellers === 2) {
+        userMessage += `\n\nChoose 2 DIFFERENT sellers (MAIN and ${CONFIG.BACKUP1_SUFFIX}) with IDs.`;
+    } else {
+        userMessage += `\n\nChoose 3 DIFFERENT sellers (MAIN, ${CONFIG.BACKUP1_SUFFIX}, and ${CONFIG.BACKUP2_SUFFIX}) with IDs.`;
+    }
 
     log('  Asking AI for seller selection...', 'ai');
     log(`  📊 Sending ${sellerData.length} candidates to AI`, 'info');
@@ -978,6 +1004,7 @@ const findRowsWithSameBaseCode = (allRows, baseCode) => {
 
 const processProductGroup = async (productName, rows, brandName, categoryName) => {
     log(`\n📦 ${productName} (${rows.length} rows)`, 'product');
+    log(`  📋 Mode: ${CONFIG.MODE}`, 'info');
 
     // Check if all rows already have valid sellers
     const rowsWithSeller = rows.filter(r => hasValidSeller(r));
@@ -989,28 +1016,64 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     let updateReason = '';
     const rowsToUpdate = [];
     
-    if (rowsWithSeller.length > 0) {
-        log(`  📊 Status check: ${rowsWithSeller.length} row(s) already have seller(s)`, 'info');
-        
-        // Check if any row needs update
-        
-        for (const row of rowsWithSeller) {
-            const check = needsUpdate(row);
-            if (check.needsUpdate) {
-                needsUpdateFlag = true;
-                if (check.needsNewSeller) {
-                    needsNewSellerFlag = true; // At least one needs new seller
-                }
-                updateReason = check.reason;
-                rowsToUpdate.push(row);
-                log(`  ⚠️ Row needs update: ${row.code || 'no code'} - ${check.reason}${check.needsNewSeller ? ' (ganti seller)' : ' (update status saja)'}`, 'warning');
-            }
+    // Check rows without codes (for UNSET mode)
+    const rowsWithoutCode = rows.filter(r => !r.code || r.code.trim() === '');
+    
+    // Apply mode-based filtering
+    if (CONFIG.MODE === 'ALL') {
+        // ALL mode: Process all rows, replace all sellers
+        log(`  🔄 Mode ALL: Will replace all sellers`, 'info');
+        // Don't skip, process everything
+    } else if (CONFIG.MODE === 'UNSET') {
+        // UNSET mode: Only process rows without codes
+        if (rowsWithoutCode.length === 0) {
+            log(`  ✅ All rows already have codes, skipping (UNSET mode)`, 'skip');
+            STATE.skipped.push({ product: productName, reason: 'All rows have codes (UNSET mode)' });
+            STATE.stats.skipped += rows.length;
+            return;
         }
-        
-        // If all rows have sellers and no update needed, skip
-        if (rowsWithoutSeller.length === 0 && !needsUpdateFlag) {
-            log(`  ✅ All rows already have valid sellers, skipping...`, 'skip');
-            STATE.skipped.push({ product: productName, reason: 'Already has valid sellers' });
+        log(`  🔄 Mode UNSET: Processing ${rowsWithoutCode.length} row(s) without codes`, 'info');
+        rows = rowsWithoutCode; // Only process rows without codes
+        rowsWithSeller = rows.filter(r => hasValidSeller(r));
+        rowsWithoutSeller = rows.filter(r => !hasValidSeller(r));
+    } else if (CONFIG.MODE === 'DISTURBANCE') {
+        // DISTURBANCE mode: Only process if there's a disturbance (needs update)
+        if (rowsWithSeller.length > 0) {
+            log(`  📊 Status check: ${rowsWithSeller.length} row(s) already have seller(s)`, 'info');
+            
+            // Check if any row needs update
+            for (const row of rowsWithSeller) {
+                const check = needsUpdate(row);
+                if (check.needsUpdate) {
+                    needsUpdateFlag = true;
+                    if (check.needsNewSeller) {
+                        needsNewSellerFlag = true; // At least one needs new seller
+                    }
+                    updateReason = check.reason;
+                    rowsToUpdate.push(row);
+                    log(`  ⚠️ Row needs update: ${row.code || 'no code'} - ${check.reason}${check.needsNewSeller ? ' (ganti seller)' : ' (update status saja)'}`, 'warning');
+                }
+            }
+            
+            // If all rows have sellers and no update needed, skip
+            if (rowsWithoutSeller.length === 0 && !needsUpdateFlag) {
+                log(`  ✅ All rows already have valid sellers, skipping (DISTURBANCE mode)`, 'skip');
+                STATE.skipped.push({ product: productName, reason: 'Already has valid sellers (DISTURBANCE mode)' });
+                STATE.stats.skipped += rows.length;
+                return;
+            }
+        } else if (rowsWithoutSeller.length > 0) {
+            // No sellers at all - process them (this is also a "disturbance")
+            log(`  🔄 Mode DISTURBANCE: Processing ${rowsWithoutSeller.length} row(s) without sellers`, 'info');
+        }
+    }
+    
+    // Re-check after mode filtering
+    if (rowsWithSeller.length > 0 && CONFIG.MODE !== 'ALL') {
+        // Check if any row needs update (for DISTURBANCE mode)
+        if (CONFIG.MODE === 'DISTURBANCE' && !needsUpdateFlag && rowsWithoutSeller.length === 0) {
+            log(`  ✅ No disturbances detected, skipping (DISTURBANCE mode)`, 'skip');
+            STATE.skipped.push({ product: productName, reason: 'No disturbances (DISTURBANCE mode)' });
             STATE.stats.skipped += rows.length;
             return;
         }
@@ -1121,28 +1184,67 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             return;
         }
 
-        const candidates = prepareSellersForAI(sellers);
-        log(`  Candidates: ${candidates.length}`, 'info');
+        // Special case: If only 1 seller available, assign to all rows without AI
+        if (sellers.length === 1) {
+            log(`  ⚠️ Only 1 seller available - assigning to all rows without AI`, 'info');
+            const singleSeller = sellers[0];
+            selectedSellers = rows.map((row, idx) => {
+                let type = 'MAIN';
+                if (idx === 1 && rows.length >= 2) type = 'B1';
+                else if (idx === 2 && rows.length >= 3) type = 'B2';
+                
+                return {
+                    type,
+                    id: singleSeller.id,
+                    id_int: singleSeller.id_int,
+                    seller: singleSeller.seller,
+                    name: singleSeller.seller,
+                    price: singleSeller.price,
+                    stock: singleSeller.stock || 0,
+                    start_cut_off: singleSeller.start_cut_off,
+                    end_cut_off: singleSeller.end_cut_off,
+                    unlimited_stock: singleSeller.unlimited_stock,
+                    faktur: singleSeller.faktur || false,
+                    multi: singleSeller.multi,
+                    multi_counter: singleSeller.multi_counter,
+                    status_sellerSku: singleSeller.status_sellerSku,
+                    deskripsi: singleSeller.deskripsi,
+                    description: singleSeller.deskripsi,
+                    reviewAvg: singleSeller.reviewAvg,
+                    rating: singleSeller.reviewAvg,
+                    seller_details: singleSeller.seller_details || {},
+                };
+            });
+            log(`  ✅ Assigned 1 seller to all ${selectedSellers.length} row(s)`, 'success');
+        } else {
+            // Multiple sellers: use AI selection
+            // Determine minimum candidates: if sellers >= 3, send at least 3
+            const minCandidates = sellers.length >= 3 ? 3 : sellers.length;
+            const candidates = prepareSellersForAI(sellers, minCandidates);
+            log(`  Candidates: ${candidates.length} (min: ${minCandidates})`, 'info');
 
-        try {
-            const usedKey = `${categoryName}-${brandName}`;
-            const usedList = STATE.usedSellers.get(usedKey) || [];
-            
-            if (usedList.length > 0) {
-                log(`  ⚠️ Avoiding recently used sellers: ${usedList.slice(-5).join(', ')}`, 'info');
+            try {
+                const usedKey = `${categoryName}-${brandName}`;
+                const usedList = STATE.usedSellers.get(usedKey) || [];
+                
+                if (usedList.length > 0) {
+                    log(`  ⚠️ Avoiding recently used sellers: ${usedList.slice(-5).join(', ')}`, 'info');
+                }
+                
+                // Determine how many sellers are needed based on rows
+                const neededSellers = rows.length >= 3 ? 3 : rows.length;
+                selectedSellers = await getAISellers(candidates, productName, usedList, [], neededSellers);
+
+                if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
+                selectedSellers.forEach(s => STATE.usedSellers.get(usedKey).push(s.seller || s.name));
+                
+                log(`  ✅ Selected ${selectedSellers.length} seller(s) for ${rows.length} row(s)`, 'success');
+            } catch (e) {
+                log(`  ❌ AI failed: ${e.message}`, 'error');
+                STATE.errors.push({ product: productName, error: `AI: ${e.message}` });
+                STATE.stats.errors += rows.length;
+                return;
             }
-            
-            selectedSellers = await getAISellers(candidates, productName, usedList);
-
-            if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
-            selectedSellers.forEach(s => STATE.usedSellers.get(usedKey).push(s.seller || s.name));
-            
-            log(`  ✅ Selected ${selectedSellers.length} seller(s) for ${rows.length} row(s)`, 'success');
-        } catch (e) {
-            log(`  ❌ AI failed: ${e.message}`, 'error');
-            STATE.errors.push({ product: productName, error: `AI: ${e.message}` });
-            STATE.stats.errors += rows.length;
-            return;
         }
 
         // Calculate max price: 5% above highest seller price
@@ -1206,11 +1308,17 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     }
     
     // Generate base code only if no rows have codes
+    // Note: Even if SET_PRODUCT_CODE is false, we still generate if code is null/empty
     if (!baseCode) {
         log(`  🏷️ No existing codes found - generating new product code...`, 'info');
-        if (CONFIG.SET_PRODUCT_CODE) {
-            if (CONFIG.GROQ_API_KEY && CONFIG.GROQ_MODEL_PRODUCT_CODE) {
-                // Use AI generation with category and brand category context
+        
+        // Check if any row has null/empty code - if so, always generate (even if SET_PRODUCT_CODE is false)
+        const hasEmptyCode = rows.some(r => !r.code || r.code.trim() === '');
+        const shouldGenerate = CONFIG.SET_PRODUCT_CODE || hasEmptyCode;
+        
+        if (shouldGenerate) {
+            if (CONFIG.GROQ_API_KEY && CONFIG.GROQ_MODEL_PRODUCT_CODE && CONFIG.SET_PRODUCT_CODE) {
+                // Use AI generation with category and brand category context (only if SET_PRODUCT_CODE is true)
                 const brandCategoryName = rows[0].product_details?.brand_category?.name || 
                                          rows[0].product_details?.type?.name || 
                                          'Umum';
@@ -1225,7 +1333,11 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 }
             } else {
                 // Fallback to script-based
-                log(`     Using script-based generation (Groq not configured)`, 'info');
+                if (!CONFIG.SET_PRODUCT_CODE && hasEmptyCode) {
+                    log(`     SET_PRODUCT_CODE is false but code is empty - generating automatically`, 'info');
+                } else {
+                    log(`     Using script-based generation (Groq not configured)`, 'info');
+                }
                 baseCode = generateProductCode(productName, brandName);
                 log(`     ✅ Generated code: ${baseCode}`, 'success');
             }
@@ -1261,8 +1373,19 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     
     // Map sellers to rows based on existing codes
     const sellerToRowMap = new Map();
+    const usedRowIds = new Set(); // Track which rows have been assigned to prevent duplicate assignment
     
     for (const seller of selectedSellers) {
+        // Skip B1 if only 1 row, skip B2 if only 1-2 rows
+        if (seller.type === 'B1' && rows.length < 2) {
+            log(`     ⏭️ Skipping ${seller.type} seller (only ${rows.length} row available)`, 'info');
+            continue;
+        }
+        if (seller.type === 'B2' && rows.length < 3) {
+            log(`     ⏭️ Skipping ${seller.type} seller (only ${rows.length} row(s) available)`, 'info');
+            continue;
+        }
+        
         let targetRow = null;
         let code = '';
         
@@ -1278,28 +1401,67 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             targetRow = codeToRowMap.get(code);
         }
         
-        // If no row found with matching code, find first row without code
+        // If row found with matching code, use it (but check if already used)
+        if (targetRow && !usedRowIds.has(targetRow.id)) {
+            usedRowIds.add(targetRow.id);
+            const finalCodeForMapping = targetRow.code.trim();
+            sellerToRowMap.set(seller.type, { row: targetRow, seller, code: finalCodeForMapping });
+            continue;
+        }
+        
+        // If no row found with matching code, find first available row without code
+        // Assign sellers to different rows based on type order: MAIN -> row[0], B1 -> row[1], B2 -> row[2]
         if (!targetRow) {
-            for (const row of rows) {
-                const rowCode = rowIdToCodeMap.get(row.id);
-                if (!rowCode || rowCode.trim() === '') {
-                    // This row doesn't have a code yet, assign seller here
-                    targetRow = row;
-                    // Generate code for this row
-                    if (seller.type === 'B1') {
-                        code = expectedCodeForB1;
-                    } else if (seller.type === 'B2') {
-                        code = expectedCodeForB2;
-                    } else {
-                        code = expectedCodeForMain;
+            // First, try to assign based on seller type order to different rows
+            let sellerIndex = -1;
+            if (seller.type === 'MAIN') sellerIndex = 0;
+            else if (seller.type === 'B1') sellerIndex = 1;
+            else if (seller.type === 'B2') sellerIndex = 2;
+            
+            // Try to assign to row at sellerIndex if available and not used
+            if (sellerIndex >= 0 && sellerIndex < rows.length) {
+                const candidateRow = rows[sellerIndex];
+                const rowCode = rowIdToCodeMap.get(candidateRow.id);
+                if ((!rowCode || rowCode.trim() === '') && !usedRowIds.has(candidateRow.id)) {
+                    targetRow = candidateRow;
+                    usedRowIds.add(candidateRow.id);
+                }
+            }
+            
+            // If still no target row, find any available row without code
+            if (!targetRow) {
+                for (const row of rows) {
+                    if (usedRowIds.has(row.id)) continue; // Skip already used rows
+                    
+                    const rowCode = rowIdToCodeMap.get(row.id);
+                    if (!rowCode || rowCode.trim() === '') {
+                        // This row doesn't have a code yet, assign seller here
+                        targetRow = row;
+                        usedRowIds.add(row.id);
+                        break;
                     }
-                    break;
+                }
+            }
+            
+            // Generate code for this row based on seller type
+            if (targetRow) {
+                if (seller.type === 'B1') {
+                    code = expectedCodeForB1;
+                } else if (seller.type === 'B2') {
+                    code = expectedCodeForB2;
+                } else {
+                    code = expectedCodeForMain;
                 }
             }
         }
         
         if (targetRow) {
-            sellerToRowMap.set(seller.type, { row: targetRow, seller, code });
+            // CRITICAL: Always use existing code from row if available, never change it
+            // This prevents changing TSEL2B1 to TSEL2 when TSEL2 already exists
+            const finalCodeForMapping = (targetRow.code && targetRow.code.trim() !== '') 
+                ? targetRow.code.trim() 
+                : code;
+            sellerToRowMap.set(seller.type, { row: targetRow, seller, code: finalCodeForMapping });
         }
     }
     
@@ -1311,26 +1473,40 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         log(`     Will generate missing codes based on seller type`, 'info');
     }
     
-    // Process each seller-row mapping
+    // Process each seller-row mapping (only process sellers that match available rows)
     let processedCount = 0;
     for (const [sellerType, mapping] of sellerToRowMap.entries()) {
-        const { row, seller, code } = mapping;
+        const { row, seller, code: mappedCode } = mapping;
+        
+        // Skip B1 if only 1 row, skip B2 if only 1-2 rows
+        if (sellerType === 'B1' && rows.length < 2) continue;
+        if (sellerType === 'B2' && rows.length < 3) continue;
+        
         processedCount++;
         
-        log(`     Mapping: ${sellerType} seller "${seller.seller || seller.name}" → Row ID ${row.id} with code "${code}"`, 'info');
+        // CRITICAL: Always use existing code from row if available, never change it
+        // This prevents changing TSEL2B1 to TSEL2 when TSEL2 already exists
+        const finalCode = (row.code && row.code.trim() !== '') ? row.code.trim() : mappedCode;
+        
+        log(`     Mapping: ${sellerType} seller "${seller.seller || seller.name}" → Row ID ${row.id}`, 'info');
+        if (row.code && row.code.trim() !== '') {
+            log(`     ✅ Using existing code from row: "${finalCode}" (preserved)`, 'info');
+        } else {
+            log(`     🆕 Using new code: "${finalCode}"`, 'info');
+        }
 
         // Validate seller price before processing
         const initialPrice = seller.price || 0;
         if (!initialPrice || initialPrice <= 0 || isNaN(initialPrice)) {
             log(`     ❌ Invalid seller price: ${initialPrice} for seller ${seller.seller || seller.name}`, 'error');
-            STATE.errors.push({ product: productName, seller: seller.seller || seller.name, code, error: `Invalid price: ${initialPrice}` });
+            STATE.errors.push({ product: productName, seller: seller.seller || seller.name, code: finalCode, error: `Invalid price: ${initialPrice}` });
             STATE.stats.errors++;
             continue; // Skip this row
         }
 
         log(`\n  🔧 Processing row ${processedCount}/${sellerToRowMap.size} (${sellerType}):`, 'info');
         log(`     Row ID: ${row.id}`, 'info');
-        log(`     Code: ${code}`, 'info');
+        log(`     Code: ${finalCode} (${row.code && row.code.trim() !== '' ? 'existing' : 'new'})`, 'info');
         log(`     Seller: ${seller.seller || seller.name}`, 'info');
         log(`     Price: ${formatRp(initialPrice)}`, 'info');
         log(`     Max Price: ${formatRp(maxPrice)}`, 'info');
@@ -1362,7 +1538,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 
                 const postData = {
                     id: row.id,
-                    code: code,
+                    code: finalCode,
                     max_price: maxPrice,
                     product: row.product,
                     product_id: row.product_id,
@@ -1396,7 +1572,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     product: productName,
                     category: categoryName,
                     type: currentSeller.type || seller.type,
-                    code,
+                    code: finalCode,
                     seller: currentSeller.seller || currentSeller.name,
                     price: currentSeller.price,
                     maxPrice,
@@ -1464,7 +1640,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 } else {
                     // Other errors - just throw
                     log(`     ❌ Save failed: ${e.message}`, 'error');
-                    STATE.errors.push({ product: productName, seller: currentSeller.seller || currentSeller.name, code, error: e.message });
+                    STATE.errors.push({ product: productName, seller: currentSeller.seller || currentSeller.name, code: finalCode, error: e.message });
                     STATE.stats.errors++;
                     break; // Exit retry loop
                 }

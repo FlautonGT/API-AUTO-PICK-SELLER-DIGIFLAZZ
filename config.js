@@ -61,6 +61,11 @@ export const CONFIG = {
     CATEGORIES_TO_PROCESS: parseArray(process.env.CATEGORIES, null),
 
     // =============================================================================
+    // MODE
+    // =============================================================================
+    MODE: (process.env.MODE || 'ALL').toUpperCase(), // ALL, UNSET, DISTURBANCE
+
+    // =============================================================================
     // PRODUCT CODE
     // =============================================================================
     SET_PRODUCT_CODE: parseBool(process.env.SET_PRODUCT_CODE, true),
