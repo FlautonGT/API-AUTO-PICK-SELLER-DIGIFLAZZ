@@ -474,9 +474,9 @@ TUGAS: Pilih seller sesuai JUMLAH yang diminta.
 === STEP PEMILIHAN ===
 
 STEP 1 - BLACKLIST (filter dulu, JANGAN pilih seller dengan ciri ini):
-- Deskripsi mengandung: "testing", "test bersama admin", "sedang testing", "percobaan", "trial", "demo", "maintenance", "sedang testing bersama admin"
+- Deskripsi mengandung: "testing", "sedang testing", "maintenance", "sedang testing bersama admin"
 - Deskripsi mengandung: "pulsa transfer", "paket transfer" (bukan stok sendiri)
-- Deskripsi terlalu singkat (< 15 karakter) atau hanya nama produk (contoh: "telkomsel 2000")
+- Deskripsi terlalu singkat atau hanya nama produk (contoh: "telkomsel 2000")
 - Deskripsi kosong atau hanya "-"
 - Multi Wajib ${CONFIG.REQUIRE_MULTI ? 'true' : 'false'}
 - Faktur Wajib ${CONFIG.REQUIRE_FP ? 'true' : 'false'}
@@ -484,25 +484,20 @@ STEP 1 - BLACKLIST (filter dulu, JANGAN pilih seller dengan ciri ini):
 STEP 2 - PILIH SELLER (dari yang lolos blacklist):
 
 MAIN (Seller Utama):
-- WAJIB: Harga TERMURAH dari yang lolos blacklist
+- WAJIB: Harga TERMURAH dari data yang diberikan
 - WAJIB: Deskripsi menyebut zona/coverage (nasional/all zone) ATAU speed ATAU stok
-- Rating: Prioritaskan >= ${CONFIG.MIN_RATING}, atau jika rating 0, null, undefinied tetap masuk
 
 ${CONFIG.BACKUP1_SUFFIX} (Backup Stabilitas):
-- WAJIB: Nama BERBEDA dari MAIN
-- Prioritas 1: Rating TERTINGGI (>= ${CONFIG.MIN_RATING}) atau jika rating 0, null, undefinied tetap masuk
-- Prioritas 2: Jika rating sama, pilih deskripsi terlengkap
-- Prioritas 3: Jika bisa, cari deskripsi yang menyebut stabil atau tidak ada gangguan, jika tidak ada, tidak apa apa
+- WAJIB: ID BERBEDA dari MAIN
+- Prioritas: Jika bisa, cari deskripsi yang menyebut stabil atau tidak ada gangguan, jika tidak ada, tidak apa apa
 - Harga: Boleh lebih mahal dari MAIN (wajar untuk kualitas), tapi kalau bisa, sedikit lebih mahal saja dari harga MAIN
 
 ${CONFIG.BACKUP2_SUFFIX} (Backup 24 Jam):
 - WAJIB: h24=1 (24 jam operasional)
 - WAJIB: Cek c= berapa, jika h24=1 dan C bukan 00:00 - 00:00, maka ad kesalahan, cari yang c=00:00 - 00:00, itu adalah 24 jam operasional yang asli, karena kadang ada kesalahan
-- WAJIB: Nama BERBEDA dari MAIN dan ${CONFIG.BACKUP1_SUFFIX}
-- WAJIB: Lolos blacklist (deskripsi "testing", "testing bersama admin" dll TETAP DILARANG meski h24=1)
-- Prioritas 1: deskripsi terbaik > harga termurah
-- Prioritas 2: Rating TERTINGGI (>= ${CONFIG.MIN_RATING}) atau jika rating 0, null, undefinied tetap masuk
-- Jika tidak ada seller yang menurutmu masuk kriteria, masukkan seller lain yang menurutmu bisa stabil seperti MAIN dan B1
+- WAJIB: ID BERBEDA dari MAIN dan ${CONFIG.BACKUP1_SUFFIX}
+- Prioritas: deskripsi terbaik > harga termurah
+- Jika tidak ada seller yang menurutmu masuk kriteria, masukkan seller lain yang menurutmu bisa stabil seperti MAIN dan ${CONFIG.BACKUP1_SUFFIX}
 
 === KRITERIA DESKRIPSI BAGUS ===
 
@@ -516,9 +511,6 @@ Speed (salah satu):
 
 Stok (salah satu):
 - "Stok Sendiri", "Full NGRS", "Stok Terjamin", "Chip Sendiri"
-
-Kualitas:
-- "Valid 100%", "Terpercaya", "Garansi", "H2H", "Mochan"
 
 === ZONA TERBATAS (HINDARI jika ada alternatif) ===
 - "Zona Jawa only", "Zona 1 saja", "Khusus Sumatera", "Jawa Bali only"
@@ -537,9 +529,7 @@ Kualitas:
   "reasoning": "penjelasan singkat pemilihan"
 }
 
-PENTING: Sertakan "id" seller untuk akurasi!
-
-INGAT: Blacklist berlaku untuk SEMUA tipe termasuk ${CONFIG.BACKUP2_SUFFIX}. Seller "testing" DILARANG dipilih meski h24=1.`;
+PENTING: Sertakan "id" seller untuk akurasi!`;
 
 const callGPTAPI = async (userMessage) => {
     STATE.stats.aiCalls++;
