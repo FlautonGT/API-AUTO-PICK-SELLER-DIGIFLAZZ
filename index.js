@@ -1241,36 +1241,83 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         STATE.generatedCodes.add(baseCode + CONFIG.BACKUP2_SUFFIX);
     }
     
+    // Map rows by their existing codes to determine which seller type should go to which row
+    // Create mapping: code -> row (based on id)
+    const codeToRowMap = new Map();
+    const rowIdToCodeMap = new Map();
+    
+    for (const row of rows) {
+        if (row.code && row.code.trim() !== '') {
+            const code = row.code.trim();
+            codeToRowMap.set(code, row);
+            rowIdToCodeMap.set(row.id, code);
+        }
+    }
+    
+    // Determine expected codes for each seller type
+    const expectedCodeForMain = baseCode;
+    const expectedCodeForB1 = baseCode + CONFIG.BACKUP1_SUFFIX;
+    const expectedCodeForB2 = baseCode + CONFIG.BACKUP2_SUFFIX;
+    
+    // Map sellers to rows based on existing codes
+    const sellerToRowMap = new Map();
+    
+    for (const seller of selectedSellers) {
+        let targetRow = null;
+        let code = '';
+        
+        // Try to find row with matching code for this seller type
+        if (seller.type === 'MAIN') {
+            code = expectedCodeForMain;
+            targetRow = codeToRowMap.get(code);
+        } else if (seller.type === 'B1') {
+            code = expectedCodeForB1;
+            targetRow = codeToRowMap.get(code);
+        } else if (seller.type === 'B2') {
+            code = expectedCodeForB2;
+            targetRow = codeToRowMap.get(code);
+        }
+        
+        // If no row found with matching code, find first row without code
+        if (!targetRow) {
+            for (const row of rows) {
+                const rowCode = rowIdToCodeMap.get(row.id);
+                if (!rowCode || rowCode.trim() === '') {
+                    // This row doesn't have a code yet, assign seller here
+                    targetRow = row;
+                    // Generate code for this row
+                    if (seller.type === 'B1') {
+                        code = expectedCodeForB1;
+                    } else if (seller.type === 'B2') {
+                        code = expectedCodeForB2;
+                    } else {
+                        code = expectedCodeForMain;
+                    }
+                    break;
+                }
+            }
+        }
+        
+        if (targetRow) {
+            sellerToRowMap.set(seller.type, { row: targetRow, seller, code });
+        }
+    }
+    
     log(`  📝 Code allocation plan:`, 'info');
     if (allRowsHaveCodes) {
-        log(`     All rows already have codes - preserving existing codes`, 'info');
+        log(`     All rows already have codes - mapping sellers to rows by code`, 'info');
     } else {
         log(`     Base code: ${baseCode}`, 'info');
         log(`     Will generate missing codes based on seller type`, 'info');
     }
-
-    for (let i = 0; i < rows.length && i < selectedSellers.length; i++) {
-        const row = rows[i];
-        const seller = selectedSellers[i];
-        const rowInfo = rowsWithCodes[i];
-
-        // Determine code - ALWAYS use existing code if available, never change it
-        let code;
-        if (rowInfo.hasCode) {
-            // Row already has code - USE IT AS IS, don't change
-            code = rowInfo.code;
-            log(`     ✅ Row ${i + 1} (${seller.type}) using existing code: ${code}`, 'info');
-        } else {
-            // Row doesn't have code - generate new one based on seller type and base code
-            if (seller.type === 'B1') {
-                code = baseCode + CONFIG.BACKUP1_SUFFIX;
-            } else if (seller.type === 'B2') {
-                code = baseCode + CONFIG.BACKUP2_SUFFIX;
-            } else {
-                code = baseCode; // MAIN
-            }
-            log(`     🆕 Row ${i + 1} (${seller.type}) new code: ${code} (from base: ${baseCode})`, 'info');
-        }
+    
+    // Process each seller-row mapping
+    let processedCount = 0;
+    for (const [sellerType, mapping] of sellerToRowMap.entries()) {
+        const { row, seller, code } = mapping;
+        processedCount++;
+        
+        log(`     Mapping: ${sellerType} seller "${seller.seller || seller.name}" → Row ID ${row.id} with code "${code}"`, 'info');
 
         // Validate seller price before processing
         const initialPrice = seller.price || 0;
@@ -1281,7 +1328,8 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             continue; // Skip this row
         }
 
-        log(`\n  🔧 Processing row ${i + 1}/${rows.length} (${seller.type}):`, 'info');
+        log(`\n  🔧 Processing row ${processedCount}/${sellerToRowMap.size} (${sellerType}):`, 'info');
+        log(`     Row ID: ${row.id}`, 'info');
         log(`     Code: ${code}`, 'info');
         log(`     Seller: ${seller.seller || seller.name}`, 'info');
         log(`     Price: ${formatRp(initialPrice)}`, 'info');
@@ -1368,7 +1416,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     // Get fresh sellers list
                     let freshSellers;
                     try {
-                        freshSellers = await retry(() => api.getSellers(rows[0].id));
+                        freshSellers = await retry(() => api.getSellers(row.id));
                         freshSellers = filterSellers(freshSellers);
                     } catch (err) {
                         log(`     ❌ Failed to get fresh sellers: ${err.message}`, 'error');
@@ -1430,14 +1478,14 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         await wait(CONFIG.DELAY_BETWEEN_SAVES);
     }
 
-    if (rows.length > selectedSellers.length) {
-        const skipped = rows.length - selectedSellers.length;
-        log(`  ⏭️  Skipped ${skipped} extra row(s) (max ${selectedSellers.length} sellers)`, 'skip');
+    if (sellerToRowMap.size < rows.length) {
+        const skipped = rows.length - sellerToRowMap.size;
+        log(`  ⏭️  Skipped ${skipped} extra row(s) (only ${sellerToRowMap.size} sellers mapped)`, 'skip');
         STATE.stats.skipped += skipped;
     }
 
     log(`  ✅ Completed: ${productName}`, 'success');
-    log(`     Processed: ${Math.min(rows.length, selectedSellers.length)}/${rows.length} rows`, 'info');
+    log(`     Processed: ${sellerToRowMap.size}/${rows.length} rows`, 'info');
     log(`${'═'.repeat(60)}\n`, 'info');
 
     STATE.stats.productsProcessed++;
