@@ -232,6 +232,12 @@ async function addProduct(product) {
  * Menambahkan produk sebanyak TARGET_PRODUCT kali (atau sesuai total_produk_seller)
  */
 async function addProductMultiple(product, categoryName) {
+    // Jika total_produk_seller adalah 0, skip produk ini
+    if (product.total_produk_seller === 0) {
+        console.log(`  ⏭️  Skip: ${product.name} - total_produk_seller = 0`);
+        return { success: 0, failed: 0 };
+    }
+    
     const targetCount = Math.min(CONFIG.TARGET_PRODUCT, product.total_produk_seller || CONFIG.TARGET_PRODUCT);
     
     if (targetCount <= 0) {
