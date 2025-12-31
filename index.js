@@ -181,6 +181,22 @@ const api = {
                 const text = await res.text();
                 const errorMsg = `HTTP ${res.status}: ${text.substring(0, 200)}`;
                 
+                // Log request body for debugging (especially for 400 errors)
+                let requestBody = null;
+                if (options.body) {
+                    try {
+                        requestBody = typeof options.body === 'string' ? JSON.parse(options.body) : options.body;
+                    } catch (e) {
+                        requestBody = options.body; // If not JSON, use as-is
+                    }
+                }
+                
+                // Log request body for errors
+                if (requestBody) {
+                    log(`  📤 Request Body:`, 'error');
+                    log(`     ${JSON.stringify(requestBody, null, 2)}`, 'error');
+                }
+                
                 // Check for KTP/PPh22 error (400) - seller mewajibkan KTP meski faktur: false
                 if (res.status === 400) {
                     const errorLower = text.toLowerCase();
@@ -196,6 +212,7 @@ const api = {
                         error.isKTPError = true;
                         error.statusCode = 400;
                         error.responseText = text;
+                        error.requestBody = requestBody; // Include request body in error
                         throw error;
                     }
                 }
@@ -206,7 +223,9 @@ const api = {
                     await wait(CONFIG.DELAY_ON_ERROR);
                 }
                 
-                throw new Error(errorMsg);
+                const error = new Error(errorMsg);
+                error.requestBody = requestBody; // Include request body in error
+                throw error;
             }
 
             return await res.json();
@@ -215,6 +234,20 @@ const api = {
             if (e.message.includes('fetch') || e.message.includes('network') || e.message.includes('timeout')) {
                 log(`⚠️ Network error, waiting ${CONFIG.DELAY_ON_ERROR}ms...`, 'warning');
                 await wait(CONFIG.DELAY_ON_ERROR);
+            }
+            
+            // Log request body if available (from error object or options)
+            if (e.requestBody) {
+                log(`  📤 Request Body:`, 'error');
+                log(`     ${JSON.stringify(e.requestBody, null, 2)}`, 'error');
+            } else if (options.body) {
+                try {
+                    const requestBody = typeof options.body === 'string' ? JSON.parse(options.body) : options.body;
+                    log(`  📤 Request Body:`, 'error');
+                    log(`     ${JSON.stringify(requestBody, null, 2)}`, 'error');
+                } catch (parseErr) {
+                    // Ignore parse errors
+                }
             }
             
             log(`API Error [${endpoint}]: ${e.message}`, 'error');
