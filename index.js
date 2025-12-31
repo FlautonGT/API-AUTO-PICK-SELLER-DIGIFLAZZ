@@ -1336,7 +1336,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     
     let baseCode;
     
-    if (someRowsHaveCodes) {
+    if (someRowsHaveCodes && CONFIG.SKIP_IF_CODES_COMPLETE) {
         // Extract base code from existing codes (remove B1/B2 prefix if present)
         log(`  🏷️ Some rows have codes - extracting base code...`, 'info');
         const existingCodes = rowsWithCodes.filter(r => r.hasCode).map(r => r.code);
@@ -1363,7 +1363,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     
     // Generate base code only if no rows have codes
     // Note: Even if SET_PRODUCT_CODE is false, we still generate if code is null/empty
-    if (!baseCode) {
+    if (!baseCode && !CONFIG.SKIP_IF_CODES_COMPLETE) {
         log(`  🏷️ No existing codes found - generating new product code...`, 'info');
         
         // Check if any row has null/empty code - if so, always generate (even if SET_PRODUCT_CODE is false)
