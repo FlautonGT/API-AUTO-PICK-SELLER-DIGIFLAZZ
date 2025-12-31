@@ -238,28 +238,43 @@ async function addProductMultiple(product, categoryName) {
         return { success: 0, failed: 0 };
     }
     
+    // Hitung target yang harus dicapai
     const targetCount = Math.min(CONFIG.TARGET_PRODUCT, product.total_produk_seller || CONFIG.TARGET_PRODUCT);
     
     if (targetCount <= 0) {
         return { success: 0, failed: 0 };
     }
     
+    // Cek total_added saat ini
+    const currentAdded = product.total_added || 0;
+    
+    // Jika sudah mencapai target, skip
+    if (currentAdded >= targetCount) {
+        console.log(`  ⏭️  Skip: ${product.name} - total_added (${currentAdded}) sudah mencapai target (${targetCount})`);
+        return { success: 0, failed: 0 };
+    }
+    
+    // Hitung berapa yang perlu ditambahkan
+    const needToAdd = targetCount - currentAdded;
+    
+    console.log(`  ℹ️  ${product.name} - total_added: ${currentAdded}, target: ${targetCount}, perlu ditambahkan: ${needToAdd}`);
+    
     let successCount = 0;
     let failedCount = 0;
     
-    for (let i = 0; i < targetCount; i++) {
+    for (let i = 0; i < needToAdd; i++) {
         const result = await addProduct(product);
         
         if (result.success) {
             successCount++;
-            console.log(`  ✅ [${i + 1}/${targetCount}] ${product.name} - ${result.message}`);
+            console.log(`  ✅ [${i + 1}/${needToAdd}] ${product.name} - ${result.message}`);
         } else {
             failedCount++;
-            console.log(`  ❌ [${i + 1}/${targetCount}] ${product.name} - ${result.message}`);
+            console.log(`  ❌ [${i + 1}/${needToAdd}] ${product.name} - ${result.message}`);
         }
         
         // Delay kecil antar request untuk menghindari rate limiting
-        if (i < targetCount - 1) {
+        if (i < needToAdd - 1) {
             await new Promise(resolve => setTimeout(resolve, 300));
         }
     }
