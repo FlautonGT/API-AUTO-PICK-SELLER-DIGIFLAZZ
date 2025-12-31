@@ -633,6 +633,36 @@ ${JSON.stringify(sellerData)}`;
     const result = await retry(() => callGPTAPI(userMessage));
 
     if (!result.sellers || result.sellers.length === 0) {
+        // Fallback: jika seller sedikit (<=5), auto-select tanpa AI
+        if (availableSellers.length <= 5) {
+            log(`  ⚠️ AI returned no sellers, but only ${availableSellers.length} seller(s) available. Auto-selecting...`, 'warning');
+            
+            // Sort by price (cheapest first), then by rating (highest first)
+            const sorted = [...availableSellers].sort((a, b) => {
+                const priceDiff = (a.price || 0) - (b.price || 0);
+                if (priceDiff !== 0) return priceDiff;
+                return (b.reviewAvg || 0) - (a.reviewAvg || 0);
+            });
+            
+            // Take needed sellers
+            const selected = sorted.slice(0, neededSellers);
+            
+            // Assign types: MAIN, B1, B2
+            const typeMap = ['MAIN', CONFIG.BACKUP1_SUFFIX, CONFIG.BACKUP2_SUFFIX];
+            const autoSelected = selected.map((seller, idx) => ({
+                type: typeMap[idx] || 'MAIN',
+                ...seller
+            }));
+            
+            log(`  ✅ Auto-selected ${autoSelected.length} seller(s) (fallback):`, 'success');
+            autoSelected.forEach((s, idx) => {
+                log(`     ${idx + 1}. ${s.type}: ${s.seller || s.name} @ ${formatRp(s.price || 0)}`, 'info');
+            });
+            
+            log(`  📋 Final sellers: ${autoSelected.map(s => `${s.type}=${s.seller || s.name}@${formatRp(s.price)}`).join(', ')}`, 'ai');
+            return autoSelected;
+        }
+        
         throw new Error('AI returned no sellers');
     }
 
@@ -770,7 +800,7 @@ TUGAS: Generate kode produk singkat berdasarkan KATEGORI, BRAND KATEGORI, BRAND,
 === ATURAN DASAR ===
 - Maksimal 25 karakter (STRICT - tidak boleh lebih)
 - Hanya HURUF KAPITAL dan ANGKA (tanpa simbol, spasi, atau underscore)
-- Format: [BRAND][KATEGORI_SUFFIX][NOMINAL/UNIT][BRAND_KATEGORI]
+- Format: [BRAND][KATEGORI_SUFFIX][BRAND_KATEGORI][NOMINAL/UNIT]
 - Kode harus UNIK dan MUDAH DIBACA
 
 === SINGKATAN BRAND (2-4 huruf) ===
@@ -786,21 +816,12 @@ TUGAS: Generate kode produk singkat berdasarkan KATEGORI, BRAND KATEGORI, BRAND,
 - PUBG → PUBG
 - (Brand lain → ambil 2-4 huruf pertama yang mudah dikenali)
 
-=== FORMAT NOMINAL ===
-- Ribuan: Hilangkan 000, tanpa suffix K
-  - 5.000 / 5000 → 5
-  - 10.000 → 10
-  - 25.000 → 25
-  - 100.000 → 100
-- Puluhan ribu langsung: 15000 → 15, 50000 → 50
-- Ratusan ribu: 100000 → 100, 500000 → 500
-
 === SUFFIX KATEGORI ===
-- Pulsa → (tidak ada suffix)
-  Contoh: TSEL5, ISAT10, XL25
+- Pulsa → P
+  Contoh: TSELP5, ISATP10, XLP25
 
-- Data → D + angka + G (untuk GB)
-  Contoh: TSELD1G, ISATD5G, XLD10G
+- Data → D + angka
+  Contoh: TSELD1, ISATD5G, XLD10
 
 - Voucher → V atau VC
   Contoh: GPV10, GPV50, GPV100
@@ -820,19 +841,28 @@ TUGAS: Generate kode produk singkat berdasarkan KATEGORI, BRAND KATEGORI, BRAND,
 - Combo → CB
 - (Lainnya → 2 huruf pertama)
 
+=== FORMAT NOMINAL ===
+- Ribuan: Hilangkan 000, tanpa suffix K
+  - 5.000 / 5000 → 5
+  - 10.000 → 10
+  - 25.000 → 25
+  - 100.000 → 100
+- Puluhan ribu langsung: 15000 → 15, 50000 → 50
+- Ratusan ribu: 100000 → 100, 500000 → 500
+
 Penempatan: Di AKHIR kode
 Contoh: TSELD1GUM (Telkomsel Data 1GB UnlimitedMax)
 
 === PRIORITAS JIKA > 10 KARAKTER ===
 Jika kombinasi melebihi 10 karakter, potong dengan prioritas:
 1. BRAND (wajib, 2-4 char)
-2. NOMINAL/UNIT (wajib)
-3. KATEGORI SUFFIX (D untuk data, V untuk voucher)
-4. BRAND KATEGORI (bisa disingkat 1-2 huruf atau dihilangkan)
+2. BRAND KATEGORI (bisa disingkat 1 huruf atau dihilangkan)
+3. KATEGORI SUFFIX (P untuk pulsa, D untuk data, V untuk voucher)
+4. NOMINAL/UNIT (wajib)
 
 === FORMAT RESPONSE ===
 
-{"code":"TSEL5","reasoning":"Telkomsel Pulsa 5rb"}
+{"code":"TSELP5","reasoning":"Telkomsel Pulsa 5rb"}
 
 HANYA balas dengan JSON di atas, tidak ada teks lain.`;
 
@@ -865,7 +895,7 @@ const callGroqAPI = async (userMessage, systemPrompt, modelName) => {
         log(`⏸️  Sleeping for ${CONFIG.RATE_LIMIT_SLEEP_DURATION / 1000} seconds...`, 'warning');
         await wait(CONFIG.RATE_LIMIT_SLEEP_DURATION);
         log(`✅ Rate limit sleep completed, retrying...`, 'success');
-        return await callGroqAPI(userMessage, systemPrompt, modelName);
+        return await callGPTAPI(userMessage, systemPrompt, modelName);
     }
 
     if (!res.ok) {
@@ -911,7 +941,7 @@ const generateProductCodeAI = async (productName, brandName = '', categoryName =
             : `🤖 Asking AI for product code...`;
         log(logMsg, 'ai');
 
-        const response = await callGroqAPI(userMessage, SYSTEM_PROMPT_PRODUCT_CODE, CONFIG.GROQ_MODEL_PRODUCT_CODE);
+        const response = await callGPTAPI(userMessage, SYSTEM_PROMPT_PRODUCT_CODE, CONFIG.GROQ_MODEL_PRODUCT_CODE);
         const result = typeof response === 'string' ? JSON.parse(response) : response;
 
         if (!result.code) {
