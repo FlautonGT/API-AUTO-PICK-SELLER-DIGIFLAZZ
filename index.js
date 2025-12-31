@@ -1553,7 +1553,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         const finalCode = (row.code && row.code.trim() !== '') ? row.code.trim() : mappedCode;
         
         log(`     Mapping: ${sellerType} seller "${seller.seller || seller.name}" → Row ID ${row.id}`, 'info');
-        if (row.code && row.code.trim() !== '') {
+        if (row.code && row.code.trim() !== '' && !CONFIG.SKIP_IF_CODES_COMPLETE) {
             log(`     ✅ Using existing code from row: "${finalCode}" (preserved)`, 'info');
         } else {
             log(`     🆕 Using new code: "${finalCode}"`, 'info');
