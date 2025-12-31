@@ -225,6 +225,8 @@ const api = {
                 
                 const error = new Error(errorMsg);
                 error.requestBody = requestBody; // Include request body in error
+                error.statusCode = res.status; // Include status code
+                error.responseText = text; // Include response text for error checking
                 throw error;
             }
 
@@ -1732,6 +1734,47 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             STATE.stats.success++;
                 
         } catch (e) {
+                // Check if it's "Produk dan Seller sudah ada sebelumnya" error (400)
+                if (e.statusCode === 400 || (e.message && e.message.includes('400'))) {
+                    const errorText = e.responseText || e.message || '';
+                    const isDuplicateError = errorText.toLowerCase().includes('sudah ada sebelumnya') || 
+                                           errorText.toLowerCase().includes('already exists') ||
+                                           errorText.toLowerCase().includes('duplicate');
+                    
+                    if (isDuplicateError) {
+                        // Check if code is already used by another row in the same product group
+                        const codeUsedByOtherRow = rows.find(r => 
+                            r.id !== row.id && 
+                            r.code && 
+                            r.code.trim() === finalCode.trim()
+                        );
+                        
+                        if (codeUsedByOtherRow) {
+                            log(`     ⚠️ Code "${finalCode}" already used by row ${codeUsedByOtherRow.id}`, 'warning');
+                            log(`     ⏭️ Skipping this row to avoid duplicate`, 'warning');
+                            STATE.errors.push({ 
+                                product: productName, 
+                                seller: currentSeller.seller || currentSeller.name, 
+                                code: finalCode, 
+                                error: `Code already used by another row: ${codeUsedByOtherRow.id}` 
+                            });
+            STATE.stats.errors++;
+                            break; // Exit retry loop, skip this row
+                        } else {
+                            log(`     ⚠️ Code "${finalCode}" + Seller "${currentSeller.seller || currentSeller.name}" combination already exists`, 'warning');
+                            log(`     💡 This might be a duplicate entry. Skipping...`, 'warning');
+                            STATE.errors.push({ 
+                                product: productName, 
+                                seller: currentSeller.seller || currentSeller.name, 
+                                code: finalCode, 
+                                error: 'Code + Seller combination already exists' 
+                            });
+                            STATE.stats.errors++;
+                            break; // Exit retry loop, skip this row
+                        }
+                    }
+                }
+                
                 // Check if it's KTP/PPh22 error (400)
                 if (e.isKTPError && e.statusCode === 400) {
                     log(`     ⚠️ Seller "${currentSeller.seller || currentSeller.name}" requires KTP/PPh22 verification`, 'warning');
