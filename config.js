@@ -42,8 +42,7 @@ export const CONFIG = {
     // SELLER FILTER
     // =============================================================================
     MIN_RATING: parseNum(process.env.MIN_RATING, 3.0),
-    MIN_RATING_PREFILTER: parseNum(process.env.MIN_RATING_PREFILTER, 3.0),
-    REQUIRE_UNLIMITED_STOCK: parseBool(process.env.REQUIRE_UNLIMITED_STOCK || process.env.REQUIRE_UNLIMITED, true),
+    REQUIRE_UNLIMITED_STOCK: parseBool(process.env.REQUIRE_UNLIMITED_STOCK, true),
     REQUIRE_MULTI: parseBool(process.env.REQUIRE_MULTI, true),
     REQUIRE_STATUS_ACTIVE: parseBool(process.env.REQUIRE_STATUS_ACTIVE, true),
     REQUIRE_FP: parseBool(process.env.REQUIRE_FP, false),
@@ -157,7 +156,6 @@ export const printConfig = () => {
     console.log('─'.repeat(50));
     console.log(`   GPT Model: ${CONFIG.GPT_MODEL} (Seller Selection)`);
     console.log(`   Groq Model: ${CONFIG.GROQ_MODEL_PRODUCT_CODE || 'NOT SET (will use fallback)'} (Product Code)`);
-    console.log(`   Min Rating: ${CONFIG.MIN_RATING} (Pre-filter: ${CONFIG.MIN_RATING_PREFILTER})`);
     console.log(`   Require Unlimited: ${CONFIG.REQUIRE_UNLIMITED_STOCK}`);
     console.log(`   Require Multi: ${CONFIG.REQUIRE_MULTI}`);
     console.log(`   Require Status Active: ${CONFIG.REQUIRE_STATUS_ACTIVE}`);

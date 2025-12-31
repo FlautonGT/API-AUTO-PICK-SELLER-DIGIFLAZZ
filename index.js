@@ -298,11 +298,11 @@ const passesRatingFilter = (seller) => {
         return true;
     }
 
-    const MIN_RATING_FILTER = CONFIG.MIN_RATING_PREFILTER || CONFIG.MIN_RATING || 3.0;
+    const MIN_RATING_FILTER = CONFIG.MIN_RATING;
 
     // Rating 0 = belum ada rating, BOLEH lolos (bukan rating jelek)
     // Rating > 0 tapi < MIN_RATING = TIDAK lolos
-    const rating = seller.reviewAvg || seller.rating || 0;
+    const rating = seller.reviewAvg;
     if (rating === 0 || rating === null || rating === undefined) {
         return true; // No rating yet, OK
     }
@@ -315,8 +315,8 @@ const filterSellers = (sellers) => {
 
     // STEP 0: Basic validation filter (price must be valid and > 0)
     let filtered = sellers.filter(s => {
-        const price = s.price || 0;
-        if (!price || price <= 0 || isNaN(price)) {
+        const price = s.price;
+        if (!price || price <= 1 || isNaN(price)) {
             if (CONFIG.LOG_FILTERED_SELLERS) {
                 log(`   ❌ Invalid price: ${s.seller} (price: ${price})`, 'warning');
             }
@@ -367,7 +367,7 @@ const filterSellers = (sellers) => {
     // STEP 3: Stock & Multi filter
     const beforeStockCount = filtered.length;
     filtered = filtered.filter(s => {
-        const requireUnlimited = CONFIG.REQUIRE_UNLIMITED_STOCK || CONFIG.REQUIRE_UNLIMITED;
+        const requireUnlimited = CONFIG.REQUIRE_UNLIMITED_STOCK;
         if (requireUnlimited && !s.unlimited_stock) return false;
         if (CONFIG.REQUIRE_MULTI && !s.multi) return false;
         if (CONFIG.REQUIRE_STATUS_ACTIVE && !s.status) return false;
@@ -403,7 +403,7 @@ const filterSellers = (sellers) => {
             }
             
             // Tetap pertahankan REQUIRE_UNLIMITED_STOCK jika true (unlimited_stock harus true)
-            const requireUnlimited = CONFIG.REQUIRE_UNLIMITED_STOCK || CONFIG.REQUIRE_UNLIMITED;
+            const requireUnlimited = CONFIG.REQUIRE_UNLIMITED_STOCK;
             if (requireUnlimited && !s.unlimited_stock) return false;
             
             // Tetap pertahankan REQUIRE_MULTI jika true (multi harus true)
