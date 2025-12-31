@@ -478,6 +478,8 @@ STEP 1 - BLACKLIST (filter dulu, JANGAN pilih seller dengan ciri ini):
 - Deskripsi mengandung: "pulsa transfer", "paket transfer" (bukan stok sendiri)
 - Deskripsi terlalu singkat (< 15 karakter) atau hanya nama produk (contoh: "telkomsel 2000")
 - Deskripsi kosong atau hanya "-"
+- Multi Wajib ${CONFIG.REQUIRE_MULTI ? 'true' : 'false'}
+- Faktur Wajib ${CONFIG.REQUIRE_FP ? 'true' : 'false'}
 
 STEP 2 - PILIH SELLER (dari yang lolos blacklist):
 
@@ -599,15 +601,14 @@ const getAISellers = async (sellers, productName, usedSellers = [], excludeSelle
         h24: (s.start_cut_off === '00:00' && s.end_cut_off === '00:00') ? 1 : 0,
         d: (s.deskripsi || '-').substring(0, 100),
         faktur: s.faktur || false, // Include faktur info
+        multi: s.multi || false, // Include multi info
     }));
     
     let userMessage = `PRODUCT: ${productName}
 NEED: ${neededSellers} seller(s)
 
-SELLERS (id, n=name, p=price, r=rating, c=cutoff, h24=24jam, d=desc, faktur=true/false):
-${JSON.stringify(sellerData)}
-
-AVOID: ${usedSellers.slice(-5).join(', ') || '-'}`;
+SELLERS (id, n=name, p=price, r=rating, c=cutoff, h24=24jam, d=desc, faktur=true/false, multi=true/false):
+${JSON.stringify(sellerData)}`;
 
     // Add exclusion info if any
     if (excludeSellerIds.length > 0) {
