@@ -1257,10 +1257,6 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 const usedKey = `${categoryName}-${brandName}`;
                 const usedList = STATE.usedSellers.get(usedKey) || [];
                 
-                if (usedList.length > 0) {
-                    log(`  ⚠️ Avoiding recently used sellers: ${usedList.slice(-5).join(', ')}`, 'info');
-                }
-                
                 // Determine how many sellers are needed based on rows
                 const neededSellers = rows.length >= 3 ? 3 : rows.length;
                 selectedSellers = await getAISellers(candidates, productName, usedList, [], neededSellers);
