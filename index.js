@@ -1449,7 +1449,7 @@ const processCategory = async (category) => {
         return;
     }
 
-    const groups = new Map();
+    let groups = new Map();
     for (const p of products) {
         const key = p.product;
         if (!groups.has(key)) groups.set(key, []);
