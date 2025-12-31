@@ -814,7 +814,11 @@ TUGAS: Generate kode produk singkat berdasarkan KATEGORI, BRAND KATEGORI, BRAND,
 - FREE FIRE → FF
 - MOBILE LEGENDS → ML atau MLBB
 - PUBG → PUBG
-- (Brand lain → ambil 2-4 huruf pertama yang mudah dikenali)
+- PLN → PLN
+- NETFLIX → NFLX
+- VIDIO → VID
+- VIU → VIU
+- (Brand lain → ambil 2-4 huruf pertama yang mudah dikenali sesuai nama brand mereka)
 
 === SUFFIX KATEGORI ===
 - Pulsa → P
@@ -839,6 +843,10 @@ TUGAS: Generate kode produk singkat berdasarkan KATEGORI, BRAND KATEGORI, BRAND,
 - Conference → CF
 - Flash → FL
 - Combo → CB
+- Malaysia → MY
+- Singapore → SG
+- Filipina → PH
+- Thailand → TH
 - (Lainnya → 2 huruf pertama)
 
 === FORMAT NOMINAL ===
@@ -871,7 +879,7 @@ const callGroqAPI = async (userMessage, systemPrompt, modelName) => {
         throw new Error('GROQ_API_KEY not set');
     }
 
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -895,7 +903,7 @@ const callGroqAPI = async (userMessage, systemPrompt, modelName) => {
         log(`⏸️  Sleeping for ${CONFIG.RATE_LIMIT_SLEEP_DURATION / 1000} seconds...`, 'warning');
         await wait(CONFIG.RATE_LIMIT_SLEEP_DURATION);
         log(`✅ Rate limit sleep completed, retrying...`, 'success');
-        return await callGPTAPI(userMessage, systemPrompt, modelName);
+        return await callGroqAPI(userMessage, systemPrompt, modelName);
     }
 
     if (!res.ok) {
@@ -941,7 +949,7 @@ const generateProductCodeAI = async (productName, brandName = '', categoryName =
             : `🤖 Asking AI for product code...`;
         log(logMsg, 'ai');
 
-        const response = await callGPTAPI(userMessage, SYSTEM_PROMPT_PRODUCT_CODE, CONFIG.GROQ_MODEL_PRODUCT_CODE);
+        const response = await callGroqAPI(userMessage, SYSTEM_PROMPT_PRODUCT_CODE, CONFIG.GROQ_MODEL_PRODUCT_CODE);
         const result = typeof response === 'string' ? JSON.parse(response) : response;
 
         if (!result.code) {
