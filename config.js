@@ -116,6 +116,11 @@ export const CONFIG = {
     ENABLE_RATE_LIMIT_DETECTION: parseBool(process.env.ENABLE_RATE_LIMIT_DETECTION, true),
     RATE_LIMIT_SLEEP_DURATION: parseNum(process.env.RATE_LIMIT_SLEEP_DURATION, 15000),
     RATE_LIMIT_CHECK_INTERVAL: parseNum(process.env.RATE_LIMIT_CHECK_INTERVAL, 500),
+
+    // =============================================================================
+    // VERIFICATION
+    // =============================================================================
+    VERIFY_SAVE: parseBool(process.env.VERIFY_SAVE, false), // Verify save by re-fetching (slower but more reliable)
 };
 
 // Validate required config

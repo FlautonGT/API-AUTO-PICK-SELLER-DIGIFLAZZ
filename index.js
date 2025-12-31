@@ -307,8 +307,31 @@ const passesRatingFilter = (seller) => {
 const filterSellers = (sellers) => {
     const before = sellers.length;
 
-    // STEP 1: Blacklist filter
+    // STEP 0: Basic validation filter (price must be valid and > 0)
     let filtered = sellers.filter(s => {
+        const price = s.price || 0;
+        if (!price || price <= 0 || isNaN(price)) {
+            if (CONFIG.LOG_FILTERED_SELLERS) {
+                log(`   ❌ Invalid price: ${s.seller} (price: ${price})`, 'warning');
+            }
+            return false;
+        }
+        if (!s.seller || !s.id) {
+            if (CONFIG.LOG_FILTERED_SELLERS) {
+                log(`   ❌ Missing seller name/id: ${s.seller || 'unknown'}`, 'warning');
+            }
+            return false;
+        }
+        return true;
+    });
+
+    if (CONFIG.VERBOSE && before !== filtered.length) {
+        log(`  After basic validation: ${filtered.length} sellers (removed ${before - filtered.length})`, 'filter');
+    }
+
+    // STEP 1: Blacklist filter
+    const beforeBlacklist = filtered.length;
+    filtered = filtered.filter(s => {
         const isBlacklisted = isBlacklistedDescription(s.deskripsi);
         if (isBlacklisted && CONFIG.LOG_FILTERED_SELLERS) {
             log(`   ❌ Blacklisted: ${s.seller} (desc: "${(s.deskripsi || '').substring(0, 30)}...")`, 'warning');
@@ -316,8 +339,8 @@ const filterSellers = (sellers) => {
         return !isBlacklisted;
     });
 
-    if (CONFIG.VERBOSE && before !== filtered.length) {
-        log(`  After blacklist filter: ${filtered.length} sellers (removed ${before - filtered.length})`, 'filter');
+    if (CONFIG.VERBOSE && beforeBlacklist !== filtered.length) {
+        log(`  After blacklist filter: ${filtered.length} sellers (removed ${beforeBlacklist - filtered.length})`, 'filter');
     }
 
     // STEP 2: Rating filter
@@ -423,7 +446,7 @@ ${CONFIG.BACKUP1_SUFFIX} (Backup Stabilitas):
 
 ${CONFIG.BACKUP2_SUFFIX} (Backup 24 Jam):
 - WAJIB: h24=1 (24 jam operasional)
-- WEAJIB: Cek c= berapa, jika h24=1 dan C bukan 00:00 - 00:00, maka ad kesalahan, cari yang c=00:00 - 00:00, itu adalah 24 jam operasional yang asli, karena kadang ada kesalahan
+- WAJIB: Cek c= berapa, jika h24=1 dan C bukan 00:00 - 00:00, maka ad kesalahan, cari yang c=00:00 - 00:00, itu adalah 24 jam operasional yang asli, karena kadang ada kesalahan
 - WAJIB: Nama BERBEDA dari MAIN dan ${CONFIG.BACKUP1_SUFFIX}
 - WAJIB: Lolos blacklist (deskripsi "testing", "testing bersama admin" dll TETAP DILARANG meski h24=1)
 - Prioritas 1: deskripsi terbaik > harga termurah
@@ -876,85 +899,322 @@ const generateProductCodeAI = async (productName, brandName = '', categoryName =
 // MAIN PROCESSING
 // =============================================================================
 
+/**
+ * Extract base code from product code (remove B1/B2 suffix)
+ */
+const getBaseCode = (code) => {
+    if (!code || typeof code !== 'string') return '';
+    let base = code.trim();
+    if (base.endsWith(CONFIG.BACKUP1_SUFFIX)) {
+        base = base.substring(0, base.length - CONFIG.BACKUP1_SUFFIX.length);
+    } else if (base.endsWith(CONFIG.BACKUP2_SUFFIX)) {
+        base = base.substring(0, base.length - CONFIG.BACKUP2_SUFFIX.length);
+    }
+    return base;
+};
+
+/**
+ * Check if product row has valid seller
+ */
+const hasValidSeller = (row) => {
+    return row.seller && 
+           row.seller !== '-' && 
+           row.price !== null && 
+           row.price > 0 &&
+           row.code && 
+           row.code.trim() !== '';
+};
+
+/**
+ * Check if product needs update (max_price > price, status false, or status_sellerSku !== 1)
+ * Returns: { needsUpdate: boolean, needsNewSeller: boolean, reason: string }
+ * - needsNewSeller = true: harus ganti seller ketiganya + update max price
+ * - needsNewSeller = false: hanya update status saja dengan seller yang sama
+ */
+const needsUpdate = (row) => {
+    // Check status_sellerSku (1 = aktif, bukan 1 = gangguan) - HARUS ganti seller
+    if (row.status_sellerSku !== 1) {
+        return { 
+            reason: `status_sellerSku is ${row.status_sellerSku} (gangguan)`, 
+            needsUpdate: true,
+            needsNewSeller: true // Ganti seller ketiganya
+        };
+    }
+    
+    // Check max_price vs price - HARUS ganti seller + update max price
+    if (row.max_price && row.price && row.max_price > row.price) {
+        return { 
+            reason: `max_price (${row.max_price}) > price (${row.price})`, 
+            needsUpdate: true,
+            needsNewSeller: true // Ganti seller ketiganya + update max price
+        };
+    }
+    
+    // Check status - HANYA update status dengan seller yang sama
+    if (!row.status) {
+        return { 
+            reason: 'status is false', 
+            needsUpdate: true,
+            needsNewSeller: false // Hanya update status, seller tetap sama
+        };
+    }
+    
+    return { reason: 'no update needed', needsUpdate: false, needsNewSeller: false };
+};
+
+/**
+ * Find all rows with same base code (for updating all 3 sellers together)
+ */
+const findRowsWithSameBaseCode = (allRows, baseCode) => {
+    const matchingRows = [];
+    for (const row of allRows) {
+        const rowBaseCode = getBaseCode(row.code || '');
+        if (rowBaseCode === baseCode) {
+            matchingRows.push(row);
+        }
+    }
+    return matchingRows;
+};
+
 const processProductGroup = async (productName, rows, brandName, categoryName) => {
     log(`\n📦 ${productName} (${rows.length} rows)`, 'product');
 
-    let sellers;
-    try {
-        sellers = await retry(() => api.getSellers(rows[0].id));
-    } catch (e) {
-        log(`  Failed to get sellers: ${e.message}`, 'error');
-        STATE.errors.push({ product: productName, error: `Get sellers: ${e.message}` });
-        STATE.stats.errors += rows.length;
-        return;
-    }
-
-    log(`  Total sellers: ${sellers.length}`, 'info');
-    sellers = filterSellers(sellers);
-
-    if (sellers.length === 0) {
-        log(`  No sellers after filter`, 'warning');
-        STATE.skipped.push({ product: productName, reason: 'No sellers after filter' });
-        STATE.stats.skipped += rows.length;
-        return;
-    }
-
-    const candidates = prepareSellersForAI(sellers);
-    log(`  Candidates: ${candidates.length}`, 'info');
-
-    let selectedSellers;
-    try {
-        const usedKey = `${categoryName}-${brandName}`;
-        const usedList = STATE.usedSellers.get(usedKey) || [];
+    // Check if all rows already have valid sellers
+    const rowsWithSeller = rows.filter(r => hasValidSeller(r));
+    const rowsWithoutSeller = rows.filter(r => !hasValidSeller(r));
+    
+    // Initialize update flags (used throughout the function)
+    let needsUpdateFlag = false;
+    let needsNewSellerFlag = false;
+    let updateReason = '';
+    const rowsToUpdate = [];
+    
+    if (rowsWithSeller.length > 0) {
+        log(`  📊 Status check: ${rowsWithSeller.length} row(s) already have seller(s)`, 'info');
         
-        if (usedList.length > 0) {
-            log(`  ⚠️ Avoiding recently used sellers: ${usedList.slice(-5).join(', ')}`, 'info');
+        // Check if any row needs update
+        
+        for (const row of rowsWithSeller) {
+            const check = needsUpdate(row);
+            if (check.needsUpdate) {
+                needsUpdateFlag = true;
+                if (check.needsNewSeller) {
+                    needsNewSellerFlag = true; // At least one needs new seller
+                }
+                updateReason = check.reason;
+                rowsToUpdate.push(row);
+                log(`  ⚠️ Row needs update: ${row.code || 'no code'} - ${check.reason}${check.needsNewSeller ? ' (ganti seller)' : ' (update status saja)'}`, 'warning');
+            }
         }
         
-        selectedSellers = await getAISellers(candidates, productName, usedList);
-
-        if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
-        selectedSellers.forEach(s => STATE.usedSellers.get(usedKey).push(s.seller || s.name));
+        // If all rows have sellers and no update needed, skip
+        if (rowsWithoutSeller.length === 0 && !needsUpdateFlag) {
+            log(`  ✅ All rows already have valid sellers, skipping...`, 'skip');
+            STATE.skipped.push({ product: productName, reason: 'Already has valid sellers' });
+            STATE.stats.skipped += rows.length;
+            return;
+        }
         
-        log(`  ✅ Selected ${selectedSellers.length} seller(s) for ${rows.length} row(s)`, 'success');
-    } catch (e) {
-        log(`  ❌ AI failed: ${e.message}`, 'error');
-        STATE.errors.push({ product: productName, error: `AI: ${e.message}` });
-        STATE.stats.errors += rows.length;
-        return;
+        // If update needed with new seller (status_sellerSku !== 1 or max_price > price)
+        if (needsUpdateFlag && needsNewSellerFlag && rowsToUpdate.length > 0) {
+            const firstRowToUpdate = rowsToUpdate[0];
+            const baseCode = getBaseCode(firstRowToUpdate.code || '');
+            
+            if (baseCode) {
+                log(`  🔄 Update needed: ${updateReason} - GANTI SELLER KETIGANYA`, 'info');
+                log(`  🔍 Base code: ${baseCode}, finding all rows with same base code...`, 'info');
+                
+                // Find all rows with same base code (including MAIN, B1, B2)
+                const allRowsSameBase = findRowsWithSameBaseCode(rows, baseCode);
+                log(`  📋 Found ${allRowsSameBase.length} row(s) with base code "${baseCode}"`, 'info');
+                
+                // Update all rows with same base code - will get new sellers
+                rows = allRowsSameBase;
+                log(`  🔄 Will update all ${rows.length} row(s) with NEW sellers + max price`, 'info');
+            }
+        } else if (needsUpdateFlag && !needsNewSellerFlag) {
+            // Only status update needed - update with same seller
+            log(`  🔄 Update needed: ${updateReason} - UPDATE STATUS SAJA (seller tetap sama)`, 'info');
+            const statusUpdateRows = rowsToUpdate;
+            if (statusUpdateRows.length > 0) {
+                const firstRow = statusUpdateRows[0];
+                const baseCode = getBaseCode(firstRow.code || '');
+                
+                if (baseCode) {
+                    // Find all rows with same base code
+                    const allRowsSameBase = findRowsWithSameBaseCode(rows, baseCode);
+                    log(`  📋 Found ${allRowsSameBase.length} row(s) with base code "${baseCode}"`, 'info');
+                    rows = allRowsSameBase;
+                    log(`  🔄 Will update status to true for all ${rows.length} row(s) with same seller`, 'info');
+                }
+            }
+        }
+    }
+    
+    // Determine if we need new sellers or just status update
+    const isStatusOnlyUpdate = needsUpdateFlag && !needsNewSellerFlag;
+    
+    // If some rows don't have sellers, process only those (unless we're doing status-only update)
+    if (rowsWithoutSeller.length > 0 && rowsWithSeller.length > 0 && !isStatusOnlyUpdate) {
+        log(`  📊 Processing ${rowsWithoutSeller.length} row(s) without seller (${rowsWithSeller.length} already have seller)`, 'info');
+        rows = rowsWithoutSeller;
     }
 
-    const maxPrice = Math.ceil(Math.max(...selectedSellers.map(s => s.price)) * 1.05);
-    log(`  💰 Max price calculated: ${formatRp(maxPrice)} (from seller prices: ${selectedSellers.map(s => formatRp(s.price)).join(', ')})`, 'info');
+    let selectedSellers = [];
+    let maxPrice = 0;
+
+    if (isStatusOnlyUpdate) {
+        // Status update only - use existing sellers from rows
+        log(`  📋 Status update only - using existing sellers`, 'info');
+        selectedSellers = rows.map((row, idx) => {
+            // Extract seller info from row
+            return {
+                type: idx === 0 ? 'MAIN' : (idx === 1 ? 'B1' : 'B2'),
+                id: row.seller_sku_id,
+                id_int: row.seller_sku_id_int,
+                seller: row.seller,
+                name: row.seller,
+                price: row.price,
+                stock: row.stock || 0,
+                start_cut_off: row.start_cut_off,
+                end_cut_off: row.end_cut_off,
+                unlimited_stock: row.unlimited_stock,
+                faktur: row.faktur || false,
+                multi: row.multi,
+                multi_counter: row.multi_counter,
+                status_sellerSku: row.status_sellerSku,
+                deskripsi: row.seller_sku_desc,
+                description: row.seller_sku_desc,
+                seller_details: row.seller_details || {},
+            };
+        });
+        
+        // Calculate max price from existing sellers
+        const existingPrices = selectedSellers.map(s => s.price || 0).filter(p => p > 0);
+        if (existingPrices.length > 0) {
+            maxPrice = Math.ceil(Math.max(...existingPrices) * 1.05);
+        } else {
+            maxPrice = rows[0].max_price || 0;
+        }
+        
+        log(`  ✅ Using existing sellers: ${selectedSellers.map(s => s.seller).join(', ')}`, 'success');
+        log(`  💰 Max price: ${formatRp(maxPrice)}`, 'info');
+    } else {
+        // Need new sellers - get from API
+        let sellers;
+        try {
+            sellers = await retry(() => api.getSellers(rows[0].id));
+        } catch (e) {
+            log(`  Failed to get sellers: ${e.message}`, 'error');
+            STATE.errors.push({ product: productName, error: `Get sellers: ${e.message}` });
+            STATE.stats.errors += rows.length;
+            return;
+        }
+
+        log(`  Total sellers: ${sellers.length}`, 'info');
+        sellers = filterSellers(sellers);
+
+        if (sellers.length === 0) {
+            log(`  No sellers after filter`, 'warning');
+            STATE.skipped.push({ product: productName, reason: 'No sellers after filter' });
+            STATE.stats.skipped += rows.length;
+            return;
+        }
+
+        const candidates = prepareSellersForAI(sellers);
+        log(`  Candidates: ${candidates.length}`, 'info');
+
+        try {
+            const usedKey = `${categoryName}-${brandName}`;
+            const usedList = STATE.usedSellers.get(usedKey) || [];
+            
+            if (usedList.length > 0) {
+                log(`  ⚠️ Avoiding recently used sellers: ${usedList.slice(-5).join(', ')}`, 'info');
+            }
+            
+            selectedSellers = await getAISellers(candidates, productName, usedList);
+
+            if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
+            selectedSellers.forEach(s => STATE.usedSellers.get(usedKey).push(s.seller || s.name));
+            
+            log(`  ✅ Selected ${selectedSellers.length} seller(s) for ${rows.length} row(s)`, 'success');
+        } catch (e) {
+            log(`  ❌ AI failed: ${e.message}`, 'error');
+            STATE.errors.push({ product: productName, error: `AI: ${e.message}` });
+            STATE.stats.errors += rows.length;
+            return;
+        }
+
+        // Calculate max price: 5% above highest seller price
+        const sellerPrices = selectedSellers.map(s => {
+            const price = s.price || 0;
+            if (!price || price <= 0 || isNaN(price)) {
+                log(`  ⚠️ Warning: Invalid price for seller ${s.seller || s.name}: ${price}`, 'warning');
+                return 0;
+            }
+            return price;
+        }).filter(p => p > 0);
+        
+        if (sellerPrices.length === 0) {
+            log(`  ❌ No valid prices found for sellers`, 'error');
+            STATE.errors.push({ product: productName, error: 'No valid seller prices' });
+            STATE.stats.errors += rows.length;
+            return;
+        }
+        
+        maxPrice = Math.ceil(Math.max(...sellerPrices) * 1.05);
+        log(`  💰 Max price calculated: ${formatRp(maxPrice)} (from seller prices: ${selectedSellers.map(s => formatRp(s.price || 0)).join(', ')})`, 'info');
+    }
     
-    // Generate product code - use AI if available, otherwise script-based
+    // Generate product code - use existing base code if available, otherwise generate new
     let baseCode;
     log(`  🏷️ Generating product code...`, 'info');
-    if (CONFIG.SET_PRODUCT_CODE) {
-        if (CONFIG.GROQ_API_KEY && CONFIG.GROQ_MODEL_PRODUCT_CODE) {
-            // Use AI generation with category and brand category context
-            const brandCategoryName = rows[0].product_details?.brand_category?.name || 
-                                     rows[0].product_details?.type?.name || 
-                                     'Umum';
-            log(`     Context: Category=${categoryName}, Brand=${brandName}, BrandCategory=${brandCategoryName}`, 'info');
-            try {
-                baseCode = await generateProductCodeAI(productName, brandName, categoryName, brandCategoryName);
-                log(`     ✅ AI generated code: ${baseCode}`, 'success');
-            } catch (e) {
-                log(`     ⚠️ AI code generation failed: ${e.message}, using fallback`, 'warning');
+    
+    // Check if any row already has a code
+    const existingCodes = rows.filter(r => r.code && r.code.trim() !== '').map(r => r.code);
+    if (existingCodes.length > 0) {
+        // Extract base code from existing codes
+        const existingBaseCodes = existingCodes.map(c => getBaseCode(c));
+        const uniqueBaseCodes = [...new Set(existingBaseCodes.filter(b => b !== ''))];
+        
+        if (uniqueBaseCodes.length > 0) {
+            // Use the most common base code
+            const baseCodeCount = {};
+            uniqueBaseCodes.forEach(b => baseCodeCount[b] = (baseCodeCount[b] || 0) + 1);
+            const sorted = Object.entries(baseCodeCount).sort((a, b) => b[1] - a[1]);
+            baseCode = sorted[0][0];
+            log(`     Using existing base code: ${baseCode} (from ${existingCodes.length} existing code(s))`, 'info');
+        }
+    }
+    
+    // If no existing base code, generate new one
+    if (!baseCode) {
+        if (CONFIG.SET_PRODUCT_CODE) {
+            if (CONFIG.GROQ_API_KEY && CONFIG.GROQ_MODEL_PRODUCT_CODE) {
+                // Use AI generation with category and brand category context
+                const brandCategoryName = rows[0].product_details?.brand_category?.name || 
+                                         rows[0].product_details?.type?.name || 
+                                         'Umum';
+                log(`     Context: Category=${categoryName}, Brand=${brandName}, BrandCategory=${brandCategoryName}`, 'info');
+                try {
+                    baseCode = await generateProductCodeAI(productName, brandName, categoryName, brandCategoryName);
+                    log(`     ✅ AI generated code: ${baseCode}`, 'success');
+                } catch (e) {
+                    log(`     ⚠️ AI code generation failed: ${e.message}, using fallback`, 'warning');
+                    baseCode = generateProductCode(productName, brandName);
+                    log(`     🔄 Fallback code: ${baseCode}`, 'info');
+                }
+            } else {
+                // Fallback to script-based
+                log(`     Using script-based generation (Groq not configured)`, 'info');
                 baseCode = generateProductCode(productName, brandName);
-                log(`     🔄 Fallback code: ${baseCode}`, 'info');
+                log(`     ✅ Generated code: ${baseCode}`, 'success');
             }
         } else {
-            // Fallback to script-based
-            log(`     Using script-based generation (Groq not configured)`, 'info');
-            baseCode = generateProductCode(productName, brandName);
-            log(`     ✅ Generated code: ${baseCode}`, 'success');
+            // Use existing code or generate new one
+            baseCode = rows[0].code || generateProductCode(productName, brandName);
+            log(`     Using existing code: ${baseCode}`, 'info');
         }
-    } else {
-        // Use existing code or generate new one
-        baseCode = rows[0].code || generateProductCode(productName, brandName);
-        log(`     Using existing code: ${baseCode}`, 'info');
     }
     
     // Track generated codes to prevent duplicates
@@ -971,14 +1231,46 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         const row = rows[i];
         const seller = selectedSellers[i];
 
+        // Determine code - use existing code structure if available, otherwise generate
         let code = baseCode;
-        if (seller.type === 'B1') code = baseCode + CONFIG.BACKUP1_SUFFIX;
-        if (seller.type === 'B2') code = baseCode + CONFIG.BACKUP2_SUFFIX;
+        if (row.code && row.code.trim() !== '') {
+            // Use existing code structure
+            const existingBase = getBaseCode(row.code);
+            if (existingBase === baseCode || existingBase === '') {
+                // Same base code or no base code, use existing structure
+                if (seller.type === 'B1') {
+                    code = existingBase ? existingBase + CONFIG.BACKUP1_SUFFIX : baseCode + CONFIG.BACKUP1_SUFFIX;
+                } else if (seller.type === 'B2') {
+                    code = existingBase ? existingBase + CONFIG.BACKUP2_SUFFIX : baseCode + CONFIG.BACKUP2_SUFFIX;
+                } else {
+                    code = existingBase || baseCode;
+                }
+            } else {
+                // Different base code, use new structure
+                if (seller.type === 'B1') code = baseCode + CONFIG.BACKUP1_SUFFIX;
+                else if (seller.type === 'B2') code = baseCode + CONFIG.BACKUP2_SUFFIX;
+                else code = baseCode;
+            }
+        } else {
+            // No existing code, generate new
+            if (seller.type === 'B1') code = baseCode + CONFIG.BACKUP1_SUFFIX;
+            else if (seller.type === 'B2') code = baseCode + CONFIG.BACKUP2_SUFFIX;
+            else code = baseCode;
+        }
+
+        // Validate seller price before processing
+        const initialPrice = seller.price || 0;
+        if (!initialPrice || initialPrice <= 0 || isNaN(initialPrice)) {
+            log(`     ❌ Invalid seller price: ${initialPrice} for seller ${seller.seller || seller.name}`, 'error');
+            STATE.errors.push({ product: productName, seller: seller.seller || seller.name, code, error: `Invalid price: ${initialPrice}` });
+            STATE.stats.errors++;
+            continue; // Skip this row
+        }
 
         log(`\n  🔧 Processing row ${i + 1}/${rows.length} (${seller.type}):`, 'info');
         log(`     Code: ${code}`, 'info');
         log(`     Seller: ${seller.seller || seller.name}`, 'info');
-        log(`     Price: ${formatRp(seller.price)}`, 'info');
+        log(`     Price: ${formatRp(initialPrice)}`, 'info');
         log(`     Max Price: ${formatRp(maxPrice)}`, 'info');
         log(`     Rating: ${seller.reviewAvg || seller.rating || 0}`, 'info');
         log(`     Faktur: ${seller.faktur ? 'Ya' : 'Tidak'}`, 'info');
@@ -1000,6 +1292,12 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     log(`     💾 Saving to API...`, 'save');
                 }
                 
+                // Validate seller price before saving
+                const sellerPrice = currentSeller.price || 0;
+                if (!sellerPrice || sellerPrice <= 0 || isNaN(sellerPrice)) {
+                    throw new Error(`Invalid seller price: ${sellerPrice} for seller ${currentSeller.seller || currentSeller.name}`);
+                }
+                
                 const postData = {
                     id: row.id,
                     code: code,
@@ -1008,7 +1306,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     product_id: row.product_id,
                     product_details: row.product_details,
                     description: row.description,
-                    price: currentSeller.price,
+                    price: sellerPrice,
                     stock: currentSeller.stock || 0,
                     start_cut_off: currentSeller.start_cut_off,
                     end_cut_off: currentSeller.end_cut_off,
@@ -1020,9 +1318,9 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     seller_sku_id_int: currentSeller.id_int,
                     seller: currentSeller.seller,
                     seller_details: currentSeller.seller_details || {},
-                    status: true,
+                    status: true, // Always set to true
                     last_update: row.last_update || '-',
-                    status_sellerSku: currentSeller.status_sellerSku,
+                    status_sellerSku: 1, // Always set to 1 (aktif, bukan gangguan)
                     sort_order: row.sort_order,
                     seller_sku_desc: currentSeller.deskripsi || '-',
                     change: true,
@@ -1156,6 +1454,31 @@ const processCategory = async (category) => {
         const key = p.product;
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(p);
+    }
+    
+    // Filter out products that already have valid sellers (if configured)
+    if (CONFIG.SKIP_IF_CODES_COMPLETE) {
+        const filteredGroups = new Map();
+        for (const [productName, rows] of groups) {
+            // Check if all rows have valid sellers and don't need update
+            const allHaveSeller = rows.every(r => hasValidSeller(r));
+            const allValid = rows.every(r => {
+                if (!hasValidSeller(r)) return false;
+                const check = needsUpdate(r);
+                return !check.needsUpdate;
+            });
+            
+            if (allHaveSeller && allValid) {
+                log(`⏭️ Skipping ${productName}: All rows have valid sellers (no update needed)`, 'skip');
+                STATE.skipped.push({ product: productName, reason: 'Already has valid sellers (no update needed)' });
+                STATE.stats.skipped += rows.length;
+                continue;
+            }
+            
+            filteredGroups.set(productName, rows);
+        }
+        groups = filteredGroups;
+        log(`After skip filter: ${groups.size} product groups to process`, 'info');
     }
 
     log(`Product groups: ${groups.size}`, 'info');
