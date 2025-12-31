@@ -1372,8 +1372,10 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     // 2. SET_PRODUCT_CODE is true (always generate new, even if existing codes exist)
     // 3. Has empty codes (need to fill them)
     if (!baseCode || shouldGenerateNew) {
-        if (baseCode && shouldGenerateNew) {
+        if (baseCode && shouldGenerateNew && CONFIG.SET_PRODUCT_CODE) {
             log(`  🏷️ SET_PRODUCT_CODE=true: Generating new code (existing: ${baseCode})...`, 'info');
+        } else if (baseCode && shouldGenerateNew && hasEmptyCode) {
+            log(`  🏷️ Some rows have empty codes - generating new product code...`, 'info');
         } else if (!baseCode) {
             log(`  🏷️ No existing codes found - generating new product code...`, 'info');
         }
@@ -1432,6 +1434,9 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     const expectedCodeForMain = baseCode;
     const expectedCodeForB1 = baseCode + CONFIG.BACKUP1_SUFFIX;
     const expectedCodeForB2 = baseCode + CONFIG.BACKUP2_SUFFIX;
+    
+    log(`  🔑 Base code for mapping: ${baseCode} (SET_PRODUCT_CODE=${CONFIG.SET_PRODUCT_CODE})`, 'info');
+    log(`     Expected codes: MAIN=${expectedCodeForMain}, B1=${expectedCodeForB1}, B2=${expectedCodeForB2}`, 'info');
     
     // Map sellers to rows based on existing codes
     const sellerToRowMap = new Map();
@@ -1536,11 +1541,20 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         }
         
         if (targetRow) {
-            // CRITICAL: Always use existing code from row if available, never change it
-            // This prevents changing TSEL2B1 to TSEL2 when TSEL2 already exists
-            const finalCodeForMapping = (targetRow.code && targetRow.code.trim() !== '') 
-                ? targetRow.code.trim() 
-                : code;
+            // Determine code for mapping:
+            // - If SET_PRODUCT_CODE=true, always use new generated code
+            // - If SET_PRODUCT_CODE=false, use existing code if available, otherwise use new code
+            let finalCodeForMapping;
+            if (CONFIG.SET_PRODUCT_CODE) {
+                // SET_PRODUCT_CODE=true: Always use new generated code
+                finalCodeForMapping = code;
+            } else if (targetRow.code && targetRow.code.trim() !== '') {
+                // SET_PRODUCT_CODE=false: Use existing code if available
+                finalCodeForMapping = targetRow.code.trim();
+            } else {
+                // No existing code: Use new code
+                finalCodeForMapping = code;
+            }
             sellerToRowMap.set(seller.type, { row: targetRow, seller, code: finalCodeForMapping });
         } else {
             log(`     ❌ ERROR: Could not map ${seller.type} seller "${seller.seller || seller.name}" to any row!`, 'error');
@@ -1574,13 +1588,27 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         
         processedCount++;
         
-        // CRITICAL: Always use existing code from row if available, never change it
-        // This prevents changing TSEL2B1 to TSEL2 when TSEL2 already exists
-        const finalCode = (row.code && row.code.trim() !== '') ? row.code.trim() : mappedCode;
+        // Determine which code to use:
+        // - If SET_PRODUCT_CODE=true, always use new generated code (mappedCode)
+        // - If SET_PRODUCT_CODE=false, use existing code if available, otherwise use mappedCode
+        // - If SKIP_IF_CODES_COMPLETE=true and row has code, preserve existing code (unless SET_PRODUCT_CODE=true)
+        let finalCode;
+        if (CONFIG.SET_PRODUCT_CODE) {
+            // SET_PRODUCT_CODE=true: Always use new generated code
+            finalCode = mappedCode;
+        } else if (row.code && row.code.trim() !== '') {
+            // SET_PRODUCT_CODE=false: Use existing code if available
+            finalCode = row.code.trim();
+        } else {
+            // No existing code: Use mapped code
+            finalCode = mappedCode;
+        }
         
         log(`     Mapping: ${sellerType} seller "${seller.seller || seller.name}" → Row ID ${row.id}`, 'info');
-        if (row.code && row.code.trim() !== '' && CONFIG.SKIP_IF_CODES_COMPLETE) {
+        if (row.code && row.code.trim() !== '' && !CONFIG.SET_PRODUCT_CODE && CONFIG.SKIP_IF_CODES_COMPLETE) {
             log(`     ✅ Using existing code from row: "${finalCode}" (preserved)`, 'info');
+        } else if (CONFIG.SET_PRODUCT_CODE && row.code && row.code.trim() !== '') {
+            log(`     🔄 Updating code from "${row.code.trim()}" to "${finalCode}" (SET_PRODUCT_CODE=true)`, 'info');
         } else {
             log(`     🆕 Using new code: "${finalCode}"`, 'info');
         }
