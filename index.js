@@ -245,6 +245,12 @@ const api = {
         return res.data || [];
     },
 
+    async getClosedProducts() {
+        log('Fetching closed/error products...', 'api');
+        const res = await this.request('/product/closed');
+        return res.data || [];
+    },
+
     async getSellers(productRowId) {
         const res = await this.request(`/seller/${productRowId}`);
         return res.data || [];
@@ -385,10 +391,33 @@ const filterSellers = (sellers) => {
     // STEP 4: Fallback jika terlalu sedikit
     if (filtered.length < 3) {
         log('  ⚠️ Too few sellers after strict filter, relaxing requirements...', 'warning');
-        // Relax: hanya filter blacklist, skip rating & multi
-        filtered = sellers.filter(s => !isBlacklistedDescription(s.deskripsi));
+        // Relax: filter blacklist + tetap pertahankan rating, REQUIRE_UNLIMITED_STOCK, REQUIRE_MULTI, dan REQUIRE_FP jika sudah di-set
+        filtered = sellers.filter(s => {
+            // Tetap filter blacklist
+            if (isBlacklistedDescription(s.deskripsi)) return false;
+            
+            // Tetap pertahankan rating filter jika ENABLE_RATING_PREFILTER = true
+            if (CONFIG.ENABLE_RATING_PREFILTER) {
+                const passes = passesRatingFilter(s);
+                if (!passes) return false;
+            }
+            
+            // Tetap pertahankan REQUIRE_UNLIMITED_STOCK jika true (unlimited_stock harus true)
+            const requireUnlimited = CONFIG.REQUIRE_UNLIMITED_STOCK || CONFIG.REQUIRE_UNLIMITED;
+            if (requireUnlimited && !s.unlimited_stock) return false;
+            
+            // Tetap pertahankan REQUIRE_MULTI jika true (multi harus true)
+            if (CONFIG.REQUIRE_MULTI && !s.multi) return false;
+            
+            // Tetap pertahankan REQUIRE_FP jika sudah di-set
+            if (CONFIG.REQUIRE_FP === false && s.faktur === true) return false;
+            if (CONFIG.REQUIRE_FP === true && s.faktur === false) return false;
+            
+            return true;
+        });
+        
         if (filtered.length < 3) {
-            log('  ⚠️ Still too few, using all non-blacklisted sellers', 'warning');
+            log('  ⚠️ Still too few, using all non-blacklisted sellers (with rating/unlimited/multi/faktur requirements)', 'warning');
         }
     }
 
@@ -1845,23 +1874,80 @@ const run = async (categoryFilter = null) => {
 
         log(`Loaded: ${STATE.categories.length} categories, ${STATE.brands.length} brands, ${STATE.types.length} types`, 'info');
 
-        let categoriesToProcess = STATE.categories.filter(c =>
-            !CONFIG.SKIP_CATEGORIES.includes(c.name)
-        );
+        // MODE=DISTURBANCE: Process closed/error products instead of categories
+        if (CONFIG.MODE === 'DISTURBANCE') {
+            log('\n🔧 MODE=DISTURBANCE: Processing closed/error products...', 'info');
+            
+            let closedProducts;
+            try {
+                closedProducts = await retry(() => api.getClosedProducts());
+            } catch (e) {
+                log(`Failed to get closed products: ${e.message}`, 'error');
+                STATE.errors.push({ error: `Get closed products: ${e.message}` });
+                throw e;
+            }
 
-        const filter = categoryFilter || CONFIG.CATEGORIES_TO_PROCESS;
-        if (filter && filter.length > 0) {
-            categoriesToProcess = categoriesToProcess.filter(c =>
-                filter.includes(c.name) || filter.includes(c.id)
+            log(`Found ${closedProducts.length} closed/error products`, 'info');
+            
+            if (closedProducts.length === 0) {
+                log('No closed products to process', 'warning');
+            } else {
+                // Group products by product name (same as processCategory)
+                let groups = new Map();
+                for (const p of closedProducts) {
+                    const key = p.product;
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key).push(p);
+                }
+
+                log(`Product groups: ${groups.size}`, 'info');
+
+                const brandMap = new Map(STATE.brands.map(b => [b.id, b.name]));
+                
+                // Get category name from first product (if available)
+                const categoryName = closedProducts[0]?.product_details?.category?.name || 'Closed Products';
+
+                let groupIndex = 0;
+                for (const [productName, rows] of groups) {
+                    if (!STATE.isRunning) {
+                        log('Stopped by user', 'stop');
+                        break;
+                    }
+
+                    groupIndex++;
+                    const brandId = rows[0].product_details?.brand?.id;
+                    const brandName = brandMap.get(brandId) || 'Unknown';
+
+                    await processProductGroup(productName, rows, brandName, categoryName);
+                    STATE.stats.total += rows.length;
+
+                    if (groupIndex % 10 === 0) {
+                        log(`Progress: ${groupIndex}/${groups.size} products`, 'info');
+                    }
+
+                    await wait(CONFIG.DELAY_BETWEEN_PRODUCTS);
+                }
+            }
+        } else {
+            // MODE=ALL or MODE=UNSET: Process by categories (normal flow)
+            let categoriesToProcess = STATE.categories.filter(c =>
+                !CONFIG.SKIP_CATEGORIES.includes(c.name)
             );
-            log(`Filtered to ${categoriesToProcess.length} categories: ${filter.join(', ')}`, 'filter');
-        }
 
-        log(`\nProcessing ${categoriesToProcess.length} categories...`, 'info');
+            const filter = categoryFilter || CONFIG.CATEGORIES_TO_PROCESS;
+            if (filter && filter.length > 0) {
+                categoriesToProcess = categoriesToProcess.filter(c =>
+                    filter.includes(c.name) || filter.includes(c.id)
+                );
+                log(`Filtered to ${categoriesToProcess.length} categories: ${filter.join(', ')}`, 'filter');
+            }
 
-        for (const category of categoriesToProcess) {
-            if (!STATE.isRunning) break;
-            await processCategory(category);
+            log(`\nProcessing ${categoriesToProcess.length} categories...`, 'info');
+
+            for (const category of categoriesToProcess) {
+                if (!STATE.isRunning) break;
+                await processCategory(category);
+            }
         }
 
     } catch (e) {
