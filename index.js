@@ -1084,7 +1084,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         // Don't skip, process everything
     } else if (CONFIG.MODE === 'UNSET') {
         // UNSET mode: Only process rows without codes
-        if (rowsWithoutCode.length === 0) {
+        if (rowsWithoutCode.length === 0 && !CONFIG.SET_PRODUCT_CODE && CONFIG.SKIP_IF_CODES_COMPLETE) {
             log(`  ✅ All rows already have codes, skipping (UNSET mode)`, 'skip');
             STATE.skipped.push({ product: productName, reason: 'All rows have codes (UNSET mode)' });
             STATE.stats.skipped += rows.length;
@@ -1520,7 +1520,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     }
     
     log(`  📝 Code allocation plan:`, 'info');
-    if (allRowsHaveCodes) {
+    if (allRowsHaveCodes && CONFIG.SKIP_IF_CODES_COMPLETE) {
         log(`     All rows already have codes - mapping sellers to rows by code`, 'info');
     } else {
         log(`     Base code: ${baseCode}`, 'info');
