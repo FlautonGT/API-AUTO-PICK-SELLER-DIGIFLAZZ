@@ -394,7 +394,7 @@ const filterSellers = (sellers) => {
         // Relax: filter blacklist + tetap pertahankan rating, REQUIRE_UNLIMITED_STOCK, REQUIRE_MULTI, dan REQUIRE_FP jika sudah di-set
         filtered = sellers.filter(s => {
             // Tetap filter blacklist
-            if (isBlacklistedDescription(s.deskripsi)) return false;
+        if (isBlacklistedDescription(s.deskripsi)) return false;
             
             // Tetap pertahankan rating filter jika ENABLE_RATING_PREFILTER = true
             if (CONFIG.ENABLE_RATING_PREFILTER) {
@@ -413,9 +413,9 @@ const filterSellers = (sellers) => {
             if (CONFIG.REQUIRE_FP === false && s.faktur === true) return false;
             if (CONFIG.REQUIRE_FP === true && s.faktur === false) return false;
             
-            return true;
-        });
-        
+        return true;
+    });
+
         if (filtered.length < 3) {
             log('  ⚠️ Still too few, using all non-blacklisted sellers (with rating/unlimited/multi/faktur requirements)', 'warning');
         }
@@ -669,7 +669,7 @@ ${JSON.stringify(sellerData)}`;
     const enrichedSellers = result.sellers.map(aiSeller => {
         // Try to find by ID first (most accurate)
         let fullSeller = sellers.find(s => s.id === aiSeller.id);
-        
+
         // Fallback: try by name (support both naming conventions)
         if (!fullSeller) {
             fullSeller = sellers.find(s => 
@@ -971,7 +971,7 @@ const generateProductCodeAI = async (productName, brandName = '', categoryName =
         }
 
         log(`🤖 AI Generated: ${code} (${result.reasoning || 'no reasoning'})`, 'ai');
-        return code;
+    return code;
 
     } catch (e) {
         log(`⚠️ AI code generation failed: ${e.message}, using fallback`, 'warning');
@@ -1222,25 +1222,25 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         log(`  💰 Max price: ${formatRp(maxPrice)}`, 'info');
     } else {
         // Need new sellers - get from API
-        let sellers;
-        try {
-            sellers = await retry(() => api.getSellers(rows[0].id));
-        } catch (e) {
-            log(`  Failed to get sellers: ${e.message}`, 'error');
-            STATE.errors.push({ product: productName, error: `Get sellers: ${e.message}` });
-            STATE.stats.errors += rows.length;
-            return;
-        }
+    let sellers;
+    try {
+        sellers = await retry(() => api.getSellers(rows[0].id));
+    } catch (e) {
+        log(`  Failed to get sellers: ${e.message}`, 'error');
+        STATE.errors.push({ product: productName, error: `Get sellers: ${e.message}` });
+        STATE.stats.errors += rows.length;
+        return;
+    }
 
-        log(`  Total sellers: ${sellers.length}`, 'info');
-        sellers = filterSellers(sellers);
+    log(`  Total sellers: ${sellers.length}`, 'info');
+    sellers = filterSellers(sellers);
 
-        if (sellers.length === 0) {
-            log(`  No sellers after filter`, 'warning');
-            STATE.skipped.push({ product: productName, reason: 'No sellers after filter' });
-            STATE.stats.skipped += rows.length;
-            return;
-        }
+    if (sellers.length === 0) {
+        log(`  No sellers after filter`, 'warning');
+        STATE.skipped.push({ product: productName, reason: 'No sellers after filter' });
+        STATE.stats.skipped += rows.length;
+        return;
+    }
 
         // Special case: If only 1 seller available, assign to all rows without AI
         if (sellers.length === 1) {
@@ -1281,23 +1281,23 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             const candidates = prepareSellersForAI(sellers, minCandidates);
             log(`  Candidates: ${candidates.length} (min: ${minCandidates})`, 'info');
 
-            try {
-                const usedKey = `${categoryName}-${brandName}`;
-                const usedList = STATE.usedSellers.get(usedKey) || [];
+    try {
+        const usedKey = `${categoryName}-${brandName}`;
+        const usedList = STATE.usedSellers.get(usedKey) || [];
                 
                 // Determine how many sellers are needed based on rows
                 const neededSellers = rows.length >= 3 ? 3 : rows.length;
                 selectedSellers = await getAISellers(candidates, productName, usedList, [], neededSellers);
 
-                if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
+        if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
                 selectedSellers.forEach(s => STATE.usedSellers.get(usedKey).push(s.seller || s.name));
                 
                 log(`  ✅ Selected ${selectedSellers.length} seller(s) for ${rows.length} row(s)`, 'success');
-            } catch (e) {
+    } catch (e) {
                 log(`  ❌ AI failed: ${e.message}`, 'error');
-                STATE.errors.push({ product: productName, error: `AI: ${e.message}` });
-                STATE.stats.errors += rows.length;
-                return;
+        STATE.errors.push({ product: productName, error: `AI: ${e.message}` });
+        STATE.stats.errors += rows.length;
+        return;
             }
         }
 
@@ -1333,11 +1333,17 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     
     const allRowsHaveCodes = rowsWithCodes.every(r => r.hasCode);
     const someRowsHaveCodes = rowsWithCodes.some(r => r.hasCode);
+    const hasEmptyCode = rows.some(r => !r.code || r.code.trim() === '');
     
     let baseCode;
     
-    if (someRowsHaveCodes && CONFIG.SKIP_IF_CODES_COMPLETE) {
-        // Extract base code from existing codes (remove B1/B2 prefix if present)
+    // Determine if we should generate new code or use existing
+    // If SET_PRODUCT_CODE is true, always generate new code (even if existing codes exist)
+    // If SET_PRODUCT_CODE is false, use existing code if available, generate only if empty
+    const shouldGenerateNew = CONFIG.SET_PRODUCT_CODE || hasEmptyCode;
+    
+    if (someRowsHaveCodes && !shouldGenerateNew && CONFIG.SKIP_IF_CODES_COMPLETE) {
+        // Extract base code from existing codes (only if we're NOT generating new code)
         log(`  🏷️ Some rows have codes - extracting base code...`, 'info');
         const existingCodes = rowsWithCodes.filter(r => r.hasCode).map(r => r.code);
         const existingBaseCodes = rowsWithCodes.filter(r => r.hasCode).map(r => r.baseCode).filter(b => b !== '');
@@ -1361,16 +1367,18 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         }
     }
     
-    // Generate base code only if no rows have codes
-    // Note: Even if SET_PRODUCT_CODE is false, we still generate if code is null/empty
-    if (!baseCode && !CONFIG.SKIP_IF_CODES_COMPLETE) {
-        log(`  🏷️ No existing codes found - generating new product code...`, 'info');
+    // Generate base code if:
+    // 1. No baseCode extracted yet (no existing codes OR should generate new)
+    // 2. SET_PRODUCT_CODE is true (always generate new, even if existing codes exist)
+    // 3. Has empty codes (need to fill them)
+    if (!baseCode || shouldGenerateNew) {
+        if (baseCode && shouldGenerateNew) {
+            log(`  🏷️ SET_PRODUCT_CODE=true: Generating new code (existing: ${baseCode})...`, 'info');
+        } else if (!baseCode) {
+            log(`  🏷️ No existing codes found - generating new product code...`, 'info');
+        }
         
-        // Check if any row has null/empty code - if so, always generate (even if SET_PRODUCT_CODE is false)
-        const hasEmptyCode = rows.some(r => !r.code || r.code.trim() === '');
-        const shouldGenerate = CONFIG.SET_PRODUCT_CODE || hasEmptyCode;
-        
-        if (shouldGenerate) {
+        if (shouldGenerateNew) {
             if (CONFIG.GROQ_API_KEY && CONFIG.GROQ_MODEL_PRODUCT_CODE && CONFIG.SET_PRODUCT_CODE) {
                 // Use AI generation with category and brand category context (only if SET_PRODUCT_CODE is true)
                 const brandCategoryName = rows[0].product_details?.brand_category?.name || 
@@ -1396,7 +1404,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 log(`     ✅ Generated code: ${baseCode}`, 'success');
             }
         } else {
-            // Use existing code or generate new one
+            // Use existing code or generate new one (fallback)
             baseCode = rows[0].code || generateProductCode(productName, brandName);
             log(`     Using existing code: ${baseCode}`, 'info');
         }
@@ -1429,6 +1437,8 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     const sellerToRowMap = new Map();
     const usedRowIds = new Set(); // Track which rows have been assigned to prevent duplicate assignment
     
+    log(`  🔄 Mapping ${selectedSellers.length} seller(s) to ${rows.length} row(s)...`, 'info');
+    
     for (const seller of selectedSellers) {
         // Skip B1 if only 1 row, skip B2 if only 1-2 rows
         if (seller.type === 'B1' && rows.length < 2) {
@@ -1460,6 +1470,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             usedRowIds.add(targetRow.id);
             const finalCodeForMapping = targetRow.code.trim();
             sellerToRowMap.set(seller.type, { row: targetRow, seller, code: finalCodeForMapping });
+            log(`     ✅ Mapped ${seller.type} to row ${targetRow.id} (matched code: ${code})`, 'info');
             continue;
         }
         
@@ -1479,6 +1490,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 if ((!rowCode || rowCode.trim() === '') && !usedRowIds.has(candidateRow.id)) {
                     targetRow = candidateRow;
                     usedRowIds.add(candidateRow.id);
+                    log(`     ✅ Mapped ${seller.type} to row ${targetRow.id} (by index ${sellerIndex}, no existing code)`, 'info');
                 }
             }
             
@@ -1492,6 +1504,20 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                         // This row doesn't have a code yet, assign seller here
                         targetRow = row;
                         usedRowIds.add(row.id);
+                        log(`     ✅ Mapped ${seller.type} to row ${targetRow.id} (first available, no existing code)`, 'info');
+                        break;
+                    }
+                }
+            }
+            
+            // If STILL no target row (all rows have codes or are used), assign to first available row anyway
+            // This ensures seller is always assigned even if all rows have codes
+            if (!targetRow) {
+                for (const row of rows) {
+                    if (!usedRowIds.has(row.id)) {
+                        targetRow = row;
+                        usedRowIds.add(row.id);
+                        log(`     ⚠️ Mapped ${seller.type} to row ${targetRow.id} (fallback: all rows have codes, using first available)`, 'warning');
                         break;
                     }
                 }
@@ -1516,7 +1542,17 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 ? targetRow.code.trim() 
                 : code;
             sellerToRowMap.set(seller.type, { row: targetRow, seller, code: finalCodeForMapping });
+        } else {
+            log(`     ❌ ERROR: Could not map ${seller.type} seller "${seller.seller || seller.name}" to any row!`, 'error');
         }
+    }
+    
+    if (sellerToRowMap.size === 0) {
+        log(`  ❌ ERROR: No sellers were mapped to rows! This should not happen.`, 'error');
+        log(`     Selected sellers: ${selectedSellers.length}, Rows: ${rows.length}`, 'error');
+        STATE.errors.push({ product: productName, error: 'Failed to map sellers to rows' });
+        STATE.stats.errors += rows.length;
+        return;
     }
     
     log(`  📝 Code allocation plan:`, 'info');
@@ -1589,15 +1625,15 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 if (!sellerPrice || sellerPrice <= 0 || isNaN(sellerPrice)) {
                     throw new Error(`Invalid seller price: ${sellerPrice} for seller ${currentSeller.seller || currentSeller.name}`);
                 }
-                
-                const postData = {
-                    id: row.id,
+
+        const postData = {
+            id: row.id,
                     code: finalCode,
-                    max_price: maxPrice,
-                    product: row.product,
-                    product_id: row.product_id,
-                    product_details: row.product_details,
-                    description: row.description,
+            max_price: maxPrice,
+            product: row.product,
+            product_id: row.product_id,
+            product_details: row.product_details,
+            description: row.description,
                     price: sellerPrice,
                     stock: currentSeller.stock || 0,
                     start_cut_off: currentSeller.start_cut_off,
@@ -1611,30 +1647,30 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     seller: currentSeller.seller,
                     seller_details: currentSeller.seller_details || {},
                     status: true, // Always set to true
-                    last_update: row.last_update || '-',
+            last_update: row.last_update || '-',
                     status_sellerSku: 1, // Always set to 1 (aktif, bukan gangguan)
-                    sort_order: row.sort_order,
+            sort_order: row.sort_order,
                     seller_sku_desc: currentSeller.deskripsi || '-',
-                    change: true,
-                };
+            change: true,
+        };
 
-                await retry(() => api.saveProduct(postData));
+            await retry(() => api.saveProduct(postData));
                 log(`     ✅ Saved successfully!`, 'success');
                 saveSuccess = true;
 
-                STATE.processed.push({
-                    product: productName,
-                    category: categoryName,
+            STATE.processed.push({
+                product: productName,
+                category: categoryName,
                     type: currentSeller.type || seller.type,
                     code: finalCode,
                     seller: currentSeller.seller || currentSeller.name,
                     price: currentSeller.price,
-                    maxPrice,
-                    timestamp: getTimestamp(),
-                });
-                STATE.stats.success++;
+                maxPrice,
+                timestamp: getTimestamp(),
+            });
+            STATE.stats.success++;
                 
-            } catch (e) {
+        } catch (e) {
                 // Check if it's KTP/PPh22 error (400)
                 if (e.isKTPError && e.statusCode === 400) {
                     log(`     ⚠️ Seller "${currentSeller.seller || currentSeller.name}" requires KTP/PPh22 verification`, 'warning');
@@ -1695,7 +1731,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     // Other errors - just throw
                     log(`     ❌ Save failed: ${e.message}`, 'error');
                     STATE.errors.push({ product: productName, seller: currentSeller.seller || currentSeller.name, code: finalCode, error: e.message });
-                    STATE.stats.errors++;
+            STATE.stats.errors++;
                     break; // Exit retry loop
                 }
             }
@@ -1955,23 +1991,23 @@ const run = async (categoryFilter = null) => {
             }
         } else {
             // MODE=ALL or MODE=UNSET: Process by categories (normal flow)
-            let categoriesToProcess = STATE.categories.filter(c =>
-                !CONFIG.SKIP_CATEGORIES.includes(c.name)
+        let categoriesToProcess = STATE.categories.filter(c =>
+            !CONFIG.SKIP_CATEGORIES.includes(c.name)
+        );
+
+        const filter = categoryFilter || CONFIG.CATEGORIES_TO_PROCESS;
+        if (filter && filter.length > 0) {
+            categoriesToProcess = categoriesToProcess.filter(c =>
+                filter.includes(c.name) || filter.includes(c.id)
             );
+            log(`Filtered to ${categoriesToProcess.length} categories: ${filter.join(', ')}`, 'filter');
+        }
 
-            const filter = categoryFilter || CONFIG.CATEGORIES_TO_PROCESS;
-            if (filter && filter.length > 0) {
-                categoriesToProcess = categoriesToProcess.filter(c =>
-                    filter.includes(c.name) || filter.includes(c.id)
-                );
-                log(`Filtered to ${categoriesToProcess.length} categories: ${filter.join(', ')}`, 'filter');
-            }
+        log(`\nProcessing ${categoriesToProcess.length} categories...`, 'info');
 
-            log(`\nProcessing ${categoriesToProcess.length} categories...`, 'info');
-
-            for (const category of categoriesToProcess) {
-                if (!STATE.isRunning) break;
-                await processCategory(category);
+        for (const category of categoriesToProcess) {
+            if (!STATE.isRunning) break;
+            await processCategory(category);
             }
         }
 
