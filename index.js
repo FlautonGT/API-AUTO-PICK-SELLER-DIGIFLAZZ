@@ -1166,29 +1166,48 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         log(`  💰 Max price calculated: ${formatRp(maxPrice)} (from seller prices: ${selectedSellers.map(s => formatRp(s.price || 0)).join(', ')})`, 'info');
     }
     
-    // Generate product code - use existing base code if available, otherwise generate new
-    let baseCode;
-    log(`  🏷️ Generating product code...`, 'info');
+    // Check which rows have codes and extract base code
+    const rowsWithCodes = rows.map((r, idx) => ({
+        index: idx,
+        row: r,
+        hasCode: r.code && r.code.trim() !== '',
+        code: r.code ? r.code.trim() : '',
+        baseCode: r.code ? getBaseCode(r.code.trim()) : ''
+    }));
     
-    // Check if any row already has a code
-    const existingCodes = rows.filter(r => r.code && r.code.trim() !== '').map(r => r.code);
-    if (existingCodes.length > 0) {
-        // Extract base code from existing codes
-        const existingBaseCodes = existingCodes.map(c => getBaseCode(c));
-        const uniqueBaseCodes = [...new Set(existingBaseCodes.filter(b => b !== ''))];
+    const allRowsHaveCodes = rowsWithCodes.every(r => r.hasCode);
+    const someRowsHaveCodes = rowsWithCodes.some(r => r.hasCode);
+    
+    let baseCode;
+    
+    if (someRowsHaveCodes) {
+        // Extract base code from existing codes (remove B1/B2 prefix if present)
+        log(`  🏷️ Some rows have codes - extracting base code...`, 'info');
+        const existingCodes = rowsWithCodes.filter(r => r.hasCode).map(r => r.code);
+        const existingBaseCodes = rowsWithCodes.filter(r => r.hasCode).map(r => r.baseCode).filter(b => b !== '');
         
-        if (uniqueBaseCodes.length > 0) {
+        log(`     Existing codes: ${existingCodes.join(', ')}`, 'info');
+        
+        if (existingBaseCodes.length > 0) {
             // Use the most common base code
             const baseCodeCount = {};
-            uniqueBaseCodes.forEach(b => baseCodeCount[b] = (baseCodeCount[b] || 0) + 1);
+            existingBaseCodes.forEach(b => baseCodeCount[b] = (baseCodeCount[b] || 0) + 1);
             const sorted = Object.entries(baseCodeCount).sort((a, b) => b[1] - a[1]);
             baseCode = sorted[0][0];
-            log(`     Using existing base code: ${baseCode} (from ${existingCodes.length} existing code(s))`, 'info');
+            log(`     ✅ Extracted base code: ${baseCode} (from ${existingCodes.length} existing code(s))`, 'success');
+        } else {
+            // If no valid base code found, try to extract from first code
+            const firstCode = existingCodes[0];
+            baseCode = getBaseCode(firstCode);
+            if (baseCode) {
+                log(`     ✅ Extracted base code: ${baseCode} (from ${firstCode})`, 'success');
+            }
         }
     }
     
-    // If no existing base code, generate new one
+    // Generate base code only if no rows have codes
     if (!baseCode) {
+        log(`  🏷️ No existing codes found - generating new product code...`, 'info');
         if (CONFIG.SET_PRODUCT_CODE) {
             if (CONFIG.GROQ_API_KEY && CONFIG.GROQ_MODEL_PRODUCT_CODE) {
                 // Use AI generation with category and brand category context
@@ -1215,47 +1234,42 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             baseCode = rows[0].code || generateProductCode(productName, brandName);
             log(`     Using existing code: ${baseCode}`, 'info');
         }
+        
+        // Track generated codes to prevent duplicates (only for new codes)
+        STATE.generatedCodes.add(baseCode);
+        STATE.generatedCodes.add(baseCode + CONFIG.BACKUP1_SUFFIX);
+        STATE.generatedCodes.add(baseCode + CONFIG.BACKUP2_SUFFIX);
     }
     
-    // Track generated codes to prevent duplicates
-    STATE.generatedCodes.add(baseCode);
-    STATE.generatedCodes.add(baseCode + CONFIG.BACKUP1_SUFFIX);
-    STATE.generatedCodes.add(baseCode + CONFIG.BACKUP2_SUFFIX);
-    
     log(`  📝 Code allocation plan:`, 'info');
-    log(`     Row 1 (MAIN): ${baseCode}`, 'info');
-    if (rows.length > 1) log(`     Row 2 (${CONFIG.BACKUP1_SUFFIX}): ${baseCode}${CONFIG.BACKUP1_SUFFIX}`, 'info');
-    if (rows.length > 2) log(`     Row 3 (${CONFIG.BACKUP2_SUFFIX}): ${baseCode}${CONFIG.BACKUP2_SUFFIX}`, 'info');
+    if (allRowsHaveCodes) {
+        log(`     All rows already have codes - preserving existing codes`, 'info');
+    } else {
+        log(`     Base code: ${baseCode}`, 'info');
+        log(`     Will generate missing codes based on seller type`, 'info');
+    }
 
     for (let i = 0; i < rows.length && i < selectedSellers.length; i++) {
         const row = rows[i];
         const seller = selectedSellers[i];
+        const rowInfo = rowsWithCodes[i];
 
-        // Determine code - use existing code structure if available, otherwise generate
-        let code = baseCode;
-        if (row.code && row.code.trim() !== '') {
-            // Use existing code structure
-            const existingBase = getBaseCode(row.code);
-            if (existingBase === baseCode || existingBase === '') {
-                // Same base code or no base code, use existing structure
-                if (seller.type === 'B1') {
-                    code = existingBase ? existingBase + CONFIG.BACKUP1_SUFFIX : baseCode + CONFIG.BACKUP1_SUFFIX;
-                } else if (seller.type === 'B2') {
-                    code = existingBase ? existingBase + CONFIG.BACKUP2_SUFFIX : baseCode + CONFIG.BACKUP2_SUFFIX;
-                } else {
-                    code = existingBase || baseCode;
-                }
-            } else {
-                // Different base code, use new structure
-                if (seller.type === 'B1') code = baseCode + CONFIG.BACKUP1_SUFFIX;
-                else if (seller.type === 'B2') code = baseCode + CONFIG.BACKUP2_SUFFIX;
-                else code = baseCode;
-            }
+        // Determine code - ALWAYS use existing code if available, never change it
+        let code;
+        if (rowInfo.hasCode) {
+            // Row already has code - USE IT AS IS, don't change
+            code = rowInfo.code;
+            log(`     ✅ Row ${i + 1} (${seller.type}) using existing code: ${code}`, 'info');
         } else {
-            // No existing code, generate new
-            if (seller.type === 'B1') code = baseCode + CONFIG.BACKUP1_SUFFIX;
-            else if (seller.type === 'B2') code = baseCode + CONFIG.BACKUP2_SUFFIX;
-            else code = baseCode;
+            // Row doesn't have code - generate new one based on seller type and base code
+            if (seller.type === 'B1') {
+                code = baseCode + CONFIG.BACKUP1_SUFFIX;
+            } else if (seller.type === 'B2') {
+                code = baseCode + CONFIG.BACKUP2_SUFFIX;
+            } else {
+                code = baseCode; // MAIN
+            }
+            log(`     🆕 Row ${i + 1} (${seller.type}) new code: ${code} (from base: ${baseCode})`, 'info');
         }
 
         // Validate seller price before processing
