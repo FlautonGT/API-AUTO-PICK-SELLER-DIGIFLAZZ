@@ -1708,7 +1708,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         await wait(CONFIG.DELAY_BETWEEN_SAVES);
     }
 
-    if (sellerToRowMap.size < rows.length) {
+    if (sellerToRowMap.size < rows.length && CONFIG.SKIP_IF_CODES_COMPLETE) {
         const skipped = rows.length - sellerToRowMap.size;
         log(`  ⏭️  Skipped ${skipped} extra row(s) (only ${sellerToRowMap.size} sellers mapped)`, 'skip');
         STATE.stats.skipped += skipped;
