@@ -1094,6 +1094,51 @@ const hasValidSeller = (row) => {
 };
 
 /**
+ * Check code consistency across rows and fix if inconsistent
+ * Returns: { isConsistent: boolean, baseCode: string, needsFix: boolean }
+ */
+const checkCodeConsistency = (rows) => {
+    if (!rows || rows.length === 0) {
+        return { isConsistent: true, baseCode: '', needsFix: false };
+    }
+    
+    // Get all rows with codes
+    const rowsWithCodes = rows.filter(r => r.code && r.code.trim() !== '');
+    if (rowsWithCodes.length === 0) {
+        return { isConsistent: true, baseCode: '', needsFix: false };
+    }
+    
+    // Extract base codes
+    const baseCodes = rowsWithCodes.map(r => getBaseCode(r.code.trim()));
+    const uniqueBaseCodes = [...new Set(baseCodes.filter(b => b !== ''))];
+    
+    // Check if all base codes are the same
+    if (uniqueBaseCodes.length === 1) {
+        return { isConsistent: true, baseCode: uniqueBaseCodes[0], needsFix: false };
+    }
+    
+    // Inconsistent: multiple base codes found
+    // Use the most common base code (or first one if equal)
+    const baseCodeCount = {};
+    baseCodes.forEach(b => {
+        if (b !== '') {
+            baseCodeCount[b] = (baseCodeCount[b] || 0) + 1;
+        }
+    });
+    
+    const sorted = Object.entries(baseCodeCount).sort((a, b) => b[1] - a[1]);
+    const mostCommonBaseCode = sorted.length > 0 ? sorted[0][0] : baseCodes[0] || '';
+    
+    return { 
+        isConsistent: false, 
+        baseCode: mostCommonBaseCode, 
+        needsFix: true,
+        existingCodes: rowsWithCodes.map(r => r.code.trim()),
+        baseCodes: uniqueBaseCodes
+    };
+};
+
+/**
  * Check if product needs update (max_price > price, status false, or status_sellerSku !== 1)
  * Returns: { needsUpdate: boolean, needsNewSeller: boolean, reason: string }
  * - needsNewSeller = true: harus ganti seller ketiganya + update max price
@@ -1150,6 +1195,40 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
 
     // Store original rows count for stats
     const originalRowsCount = rows.length;
+    
+    // Store original rows for reference (needed for code consistency check and error handling)
+    const originalRows = [...rows];
+
+    // Check code consistency across all rows (for all modes)
+    const consistencyCheck = checkCodeConsistency(rows);
+    if (!consistencyCheck.isConsistent && consistencyCheck.needsFix) {
+        log(`  ⚠️ Code inconsistency detected!`, 'warning');
+        log(`     Existing codes: ${consistencyCheck.existingCodes.join(', ')}`, 'info');
+        log(`     Base codes found: ${consistencyCheck.baseCodes.join(', ')}`, 'info');
+        log(`     Will use base code: ${consistencyCheck.baseCode}`, 'info');
+        log(`  🔧 Fixing code consistency...`, 'info');
+        
+        // Update all rows to use consistent base code
+        rows = rows.map((row, idx) => {
+            if (row.code && row.code.trim() !== '') {
+                const expectedCode = idx === 0 
+                    ? consistencyCheck.baseCode 
+                    : (idx === 1 && rows.length >= 2 
+                        ? consistencyCheck.baseCode + CONFIG.BACKUP1_SUFFIX 
+                        : (idx === 2 && rows.length >= 3 
+                            ? consistencyCheck.baseCode + CONFIG.BACKUP2_SUFFIX 
+                            : row.code));
+                
+                if (row.code.trim() !== expectedCode) {
+                    log(`     🔄 Row ${idx + 1}: "${row.code.trim()}" → "${expectedCode}"`, 'info');
+                    return { ...row, code: expectedCode };
+                }
+            }
+            return row;
+        });
+        
+        log(`  ✅ Code consistency fixed`, 'success');
+    }
 
     // Check if all rows already have valid sellers
     let rowsWithSeller = rows.filter(r => hasValidSeller(r));
@@ -1724,6 +1803,9 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     
     // Process each seller-row mapping (only process sellers that match available rows)
     // Helper function to process sellers with retry logic for duplicate seller errors
+    // Track saved rows to update them if code changes
+    const savedRowsMap = new Map(); // Map: rowId -> { row, seller, code, sellerType }
+    
     const processSellersWithRetry = async (currentSellerToRowMap, retryCount = 0) => {
         const maxDuplicateSellerRetries = 3;
         let processedCount = 0;
@@ -1841,6 +1923,9 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             await retry(() => api.saveProduct(postData));
                 log(`     ✅ Saved successfully!`, 'success');
                 saveSuccess = true;
+                
+                // Track saved row for potential code update if error 422 occurs later
+                savedRowsMap.set(row.id, { row, seller: currentSeller, code: finalCode, sellerType: seller.type });
 
             STATE.processed.push({
                 product: productName,
@@ -1942,11 +2027,24 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     if (isCodeTakenError) {
                         log(`     ⚠️ Code "${finalCode}" already taken - requesting AI to generate new code...`, 'warning');
                         
+                        // Check if there are saved rows (MAIN/B1 already saved)
+                        const hasSavedRows = savedRowsMap.size > 0;
+                        if (hasSavedRows) {
+                            log(`     ⚠️ ${savedRowsMap.size} row(s) already saved - will update ALL rows with new base code for consistency`, 'warning');
+                        }
+                        
                         // Get used codes (including current one and all generated codes)
                         const usedCodes = Array.from(STATE.generatedCodes);
                         if (finalCode && !usedCodes.includes(finalCode)) {
                             usedCodes.push(finalCode);
                         }
+                        
+                        // Also add codes from saved rows
+                        savedRowsMap.forEach((saved, rowId) => {
+                            if (saved.code && !usedCodes.includes(saved.code)) {
+                                usedCodes.push(saved.code);
+                            }
+                        });
                         
                         // Generate new code using AI
                         try {
@@ -1965,7 +2063,72 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                                 1 // retryCount
                             );
                             
-                            // Determine new code based on seller type
+                            log(`     ✅ AI generated new base code: ${newBaseCode}`, 'success');
+                            
+                            // If there are saved rows, update them with new base code
+                            if (hasSavedRows) {
+                                log(`     🔄 Updating ${savedRowsMap.size} saved row(s) with new base code for consistency...`, 'info');
+                                
+                                for (const [savedRowId, savedData] of savedRowsMap.entries()) {
+                                    const savedRow = savedData.row;
+                                    const savedSellerType = savedData.sellerType;
+                                    
+                                    // Determine new code for saved row
+                                    let newCodeForSaved;
+                                    if (savedSellerType === 'MAIN') {
+                                        newCodeForSaved = newBaseCode;
+                                    } else if (savedSellerType === 'B1') {
+                                        newCodeForSaved = newBaseCode + CONFIG.BACKUP1_SUFFIX;
+                                    } else if (savedSellerType === 'B2') {
+                                        newCodeForSaved = newBaseCode + CONFIG.BACKUP2_SUFFIX;
+                                    } else {
+                                        newCodeForSaved = newBaseCode;
+                                    }
+                                    
+                                    // Update saved row with new code
+                                    const updatePostData = {
+                                        id: savedRow.id,
+                                        code: newCodeForSaved,
+                                        max_price: 0,
+                                        product: savedRow.product,
+                                        product_id: savedRow.product_id,
+                                        product_details: savedRow.product_details,
+                                        description: savedRow.description,
+                                        price: savedData.seller.price,
+                                        stock: savedData.seller.stock || 0,
+                                        start_cut_off: savedData.seller.start_cut_off,
+                                        end_cut_off: savedData.seller.end_cut_off,
+                                        unlimited_stock: savedData.seller.unlimited_stock,
+                                        faktur: savedData.seller.faktur || false,
+                                        multi: savedData.seller.multi,
+                                        multi_counter: savedData.seller.multi_counter,
+                                        seller_sku_id: savedData.seller.id,
+                                        seller_sku_id_int: savedData.seller.id_int,
+                                        seller: savedData.seller.seller,
+                                        seller_details: savedData.seller.seller_details || {},
+                                        status: true,
+                                        last_update: savedRow.last_update || '-',
+                                        status_sellerSku: 1,
+                                        sort_order: savedRow.sort_order,
+                                        seller_sku_desc: savedData.seller.deskripsi || '-',
+                                        change: true,
+                                    };
+                                    
+                                    try {
+                                        await retry(() => api.saveProduct(updatePostData));
+                                        log(`     ✅ Updated saved row ${savedRowId} (${savedSellerType}): "${savedData.code}" → "${newCodeForSaved}"`, 'success');
+                                        
+                                        // Update saved row code in map
+                                        savedRowsMap.set(savedRowId, { ...savedData, code: newCodeForSaved });
+                                    } catch (updateErr) {
+                                        log(`     ⚠️ Failed to update saved row ${savedRowId}: ${updateErr.message}`, 'warning');
+                                    }
+                                    
+                                    await wait(CONFIG.DELAY_BETWEEN_SAVES);
+                                }
+                            }
+                            
+                            // Determine new code based on seller type for current row
                             let newCode;
                             if (seller.type === 'MAIN') {
                                 newCode = newBaseCode;
@@ -1977,7 +2140,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                                 newCode = newBaseCode;
                             }
                             
-                            log(`     ✅ AI generated new code: ${newCode}`, 'success');
+                            log(`     ✅ Using new code for current row: ${newCode}`, 'success');
                             
                             // Update finalCode and retry
                             finalCode = newCode;
