@@ -528,7 +528,7 @@ ${CONFIG.BACKUP1_SUFFIX} (Backup Stabilitas):
 - Harga: Boleh lebih mahal dari MAIN (wajar untuk kualitas), tapi kalau bisa, sedikit lebih mahal saja dari harga MAIN
 
 ${CONFIG.BACKUP2_SUFFIX} (Backup 24 Jam):
-- WAJIB: h24=1 (24 jam operasional)
+- WAJIB: h24=1 (24 jam operasional), jika tidak ada, cari yang mendekati cut off tercepat
 - WAJIB: Cek c= berapa, jika h24=1 dan C bukan 00:00 - 00:00, maka ad kesalahan, cari yang c=00:00 - 00:00, itu adalah 24 jam operasional yang asli, karena kadang ada kesalahan
 - WAJIB: ID BERBEDA dari MAIN dan ${CONFIG.BACKUP1_SUFFIX}
 - Prioritas: deskripsi terbaik > harga termurah
@@ -1245,16 +1245,11 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             };
         });
         
-        // Calculate max price from existing sellers
-        const existingPrices = selectedSellers.map(s => s.price || 0).filter(p => p > 0);
-        if (existingPrices.length > 0) {
-            maxPrice = Math.ceil(Math.max(...existingPrices) * 1.05);
-        } else {
-            maxPrice = rows[0].max_price || 0;
-        }
+        // Max price: set to 0 (tidak ngaruh)
+        maxPrice = 0;
         
         log(`  ✅ Using existing sellers: ${selectedSellers.map(s => s.seller).join(', ')}`, 'success');
-        log(`  💰 Max price: ${formatRp(maxPrice)}`, 'info');
+        log(`  💰 Max price: ${formatRp(maxPrice)} (set to 0)`, 'info');
     } else {
         // Need new sellers - get from API
     let sellers;
@@ -1336,25 +1331,9 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             }
         }
 
-        // Calculate max price: 5% above highest seller price
-        const sellerPrices = selectedSellers.map(s => {
-            const price = s.price || 0;
-            if (!price || price <= 0 || isNaN(price)) {
-                log(`  ⚠️ Warning: Invalid price for seller ${s.seller || s.name}: ${price}`, 'warning');
-                return 0;
-            }
-            return price;
-        }).filter(p => p > 0);
-        
-        if (sellerPrices.length === 0) {
-            log(`  ❌ No valid prices found for sellers`, 'error');
-            STATE.errors.push({ product: productName, error: 'No valid seller prices' });
-            STATE.stats.errors += rows.length;
-            return;
-        }
-        
-        maxPrice = Math.ceil(Math.max(...sellerPrices) * 1.05);
-        log(`  💰 Max price calculated: ${formatRp(maxPrice)} (from seller prices: ${selectedSellers.map(s => formatRp(s.price || 0)).join(', ')})`, 'info');
+        // Max price: set to 0 (tidak ngaruh)
+        maxPrice = 0;
+        log(`  💰 Max price: ${formatRp(maxPrice)} (set to 0)`, 'info');
     }
     
     // Check which rows have codes and extract base code
@@ -1613,8 +1592,13 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     }
     
     // Process each seller-row mapping (only process sellers that match available rows)
-    let processedCount = 0;
-    for (const [sellerType, mapping] of sellerToRowMap.entries()) {
+    // Helper function to process sellers with retry logic for duplicate seller errors
+    const processSellersWithRetry = async (currentSellerToRowMap, retryCount = 0) => {
+        const maxDuplicateSellerRetries = 3;
+        let processedCount = 0;
+        
+        try {
+            for (const [sellerType, mapping] of currentSellerToRowMap.entries()) {
         const { row, seller, code: mappedCode } = mapping;
         
         // Skip B1 if only 1 row, skip B2 if only 1-2 rows
@@ -1742,36 +1726,16 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                                            errorText.toLowerCase().includes('duplicate');
                     
                     if (isDuplicateError) {
-                        // Check if code is already used by another row in the same product group
-                        const codeUsedByOtherRow = rows.find(r => 
-                            r.id !== row.id && 
-                            r.code && 
-                            r.code.trim() === finalCode.trim()
-                        );
+                        // Error "Produk dan Seller sudah ada sebelumnya" berarti ada seller yang sama antara MAIN/B1/B2
+                        // Harus ganti semua seller (MAIN, B1, B2) dengan seller yang berbeda
+                        log(`     ⚠️ Duplicate seller detected: "${currentSeller.seller || currentSeller.name}" already used in another row`, 'warning');
+                        log(`     🔄 Will replace ALL sellers (MAIN, B1, B2) to avoid duplicates`, 'info');
                         
-                        if (codeUsedByOtherRow) {
-                            log(`     ⚠️ Code "${finalCode}" already used by row ${codeUsedByOtherRow.id}`, 'warning');
-                            log(`     ⏭️ Skipping this row to avoid duplicate`, 'warning');
-                            STATE.errors.push({ 
-                                product: productName, 
-                                seller: currentSeller.seller || currentSeller.name, 
-                                code: finalCode, 
-                                error: `Code already used by another row: ${codeUsedByOtherRow.id}` 
-                            });
-            STATE.stats.errors++;
-                            break; // Exit retry loop, skip this row
-                        } else {
-                            log(`     ⚠️ Code "${finalCode}" + Seller "${currentSeller.seller || currentSeller.name}" combination already exists`, 'warning');
-                            log(`     💡 This might be a duplicate entry. Skipping...`, 'warning');
-                            STATE.errors.push({ 
-                                product: productName, 
-                                seller: currentSeller.seller || currentSeller.name, 
-                                code: finalCode, 
-                                error: 'Code + Seller combination already exists' 
-                            });
-                            STATE.stats.errors++;
-                            break; // Exit retry loop, skip this row
-                        }
+                        // Throw special error to be caught at processProductGroup level
+                        const duplicateError = new Error(`Duplicate seller: ${currentSeller.seller || currentSeller.name}`);
+                        duplicateError.isDuplicateSellerError = true;
+                        duplicateError.usedSellerIds = Array.from(sellerToRowMap.values()).map(m => m.seller.id).filter(Boolean);
+                        throw duplicateError;
                     }
                 }
                 
@@ -1847,15 +1811,131 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
 
         await wait(CONFIG.DELAY_BETWEEN_SAVES);
     }
-
-    if (sellerToRowMap.size < rows.length && CONFIG.SKIP_IF_CODES_COMPLETE) {
-        const skipped = rows.length - sellerToRowMap.size;
-        log(`  ⏭️  Skipped ${skipped} extra row(s) (only ${sellerToRowMap.size} sellers mapped)`, 'skip');
+    
+    // Return the sellerToRowMap after successful processing
+    return currentSellerToRowMap;
+    } catch (e) {
+            // Handle duplicate seller error at product group level
+            if (e.isDuplicateSellerError && retryCount < maxDuplicateSellerRetries) {
+                log(`  ⚠️ Duplicate seller error detected - replacing ALL sellers (MAIN, B1, B2)`, 'warning');
+                log(`  🔄 Retry attempt ${retryCount + 1}/${maxDuplicateSellerRetries}...`, 'info');
+                
+                // Collect all used seller IDs
+                const usedSellerIds = e.usedSellerIds || Array.from(sellerToRowMap.values()).map(m => m.seller.id).filter(Boolean);
+                log(`  📋 Excluding ${usedSellerIds.length} seller(s) that caused duplicates`, 'info');
+                
+                // Get fresh sellers
+                let freshSellers;
+                try {
+                    freshSellers = await retry(() => api.getSellers(rows[0].id));
+                    freshSellers = filterSellers(freshSellers);
+                } catch (err) {
+                    log(`  ❌ Failed to get fresh sellers: ${err.message}`, 'error');
+                    STATE.errors.push({ product: productName, error: `Get fresh sellers: ${err.message}` });
+                    STATE.stats.errors += rows.length;
+                    return;
+                }
+                
+                if (freshSellers.length === 0) {
+                    log(`  ❌ No sellers available after filtering`, 'error');
+                    STATE.errors.push({ product: productName, error: 'No sellers available after duplicate error' });
+                    STATE.stats.errors += rows.length;
+                    return;
+                }
+                
+                // Re-select all sellers with excluded problematic sellers
+                const neededSellers = rows.length >= 3 ? 3 : rows.length;
+                const candidates = prepareSellersForAI(freshSellers, neededSellers);
+                const usedKey = `${categoryName}-${brandName}`;
+                const usedList = STATE.usedSellers.get(usedKey) || [];
+                
+                try {
+                    const newSelectedSellers = await getAISellers(candidates, productName, usedList, usedSellerIds, neededSellers);
+                    
+                    // Update used sellers
+                    if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
+                    newSelectedSellers.forEach(s => STATE.usedSellers.get(usedKey).push(s.seller || s.name));
+                    
+                    log(`  ✅ Re-selected ${newSelectedSellers.length} seller(s) (excluding duplicates)`, 'success');
+                    
+                    // Max price: set to 0 (tidak ngaruh)
+                    maxPrice = 0;
+                    
+                    // Re-map sellers to rows
+                    const newSellerToRowMap = new Map();
+                    const newUsedRowIds = new Set();
+                    
+                    log(`  🔄 Re-mapping ${newSelectedSellers.length} seller(s) to ${rows.length} row(s)...`, 'info');
+                    
+                    for (const seller of newSelectedSellers) {
+                        if (seller.type === 'B1' && rows.length < 2) continue;
+                        if (seller.type === 'B2' && rows.length < 3) continue;
+                        
+                        let targetRow = null;
+                        let code = '';
+                        
+                        if (seller.type === 'MAIN') {
+                            code = expectedCodeForMain;
+                            targetRow = codeToRowMap.get(code);
+                        } else if (seller.type === 'B1') {
+                            code = expectedCodeForB1;
+                            targetRow = codeToRowMap.get(code);
+                        } else if (seller.type === 'B2') {
+                            code = expectedCodeForB2;
+                            targetRow = codeToRowMap.get(code);
+                        }
+                        
+                        if (targetRow && !newUsedRowIds.has(targetRow.id)) {
+                            newUsedRowIds.add(targetRow.id);
+                            const finalCodeForMapping = targetRow.code.trim();
+                            newSellerToRowMap.set(seller.type, { row: targetRow, seller, code: finalCodeForMapping });
+                            continue;
+                        }
+                        
+                        // Find first available row
+                        for (let i = 0; i < rows.length; i++) {
+                            const r = rows[i];
+                            if (!newUsedRowIds.has(r.id)) {
+                                newUsedRowIds.add(r.id);
+                                let mappedCode = '';
+                                if (seller.type === 'MAIN') mappedCode = expectedCodeForMain;
+                                else if (seller.type === 'B1') mappedCode = expectedCodeForB1;
+                                else if (seller.type === 'B2') mappedCode = expectedCodeForB2;
+                                
+                                newSellerToRowMap.set(seller.type, { row: r, seller, code: mappedCode });
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Recursively retry with new sellers
+                    const result = await processSellersWithRetry(newSellerToRowMap, retryCount + 1);
+                    return result;
+                    
+                } catch (aiErr) {
+                    log(`  ❌ AI re-selection failed: ${aiErr.message}`, 'error');
+                    STATE.errors.push({ product: productName, error: `AI re-selection: ${aiErr.message}` });
+                    STATE.stats.errors += rows.length;
+                    return;
+                }
+            } else {
+                // Not a duplicate seller error or max retries reached - re-throw
+                throw e;
+            }
+        }
+    };
+    
+    // Start processing and get final result
+    const finalSellerToRowMap = await processSellersWithRetry(sellerToRowMap);
+    
+    if (finalSellerToRowMap.size < rows.length && CONFIG.SKIP_IF_CODES_COMPLETE) {
+        const skipped = rows.length - finalSellerToRowMap.size;
+        log(`  ⏭️  Skipped ${skipped} extra row(s) (only ${finalSellerToRowMap.size} sellers mapped)`, 'skip');
         STATE.stats.skipped += skipped;
     }
 
     log(`  ✅ Completed: ${productName}`, 'success');
-    log(`     Processed: ${sellerToRowMap.size}/${rows.length} rows`, 'info');
+    log(`     Processed: ${finalSellerToRowMap.size}/${rows.length} rows`, 'info');
     log(`${'═'.repeat(60)}\n`, 'info');
 
     STATE.stats.productsProcessed++;
