@@ -1100,8 +1100,8 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     log(`  📋 Mode: ${CONFIG.MODE}`, 'info');
 
     // Check if all rows already have valid sellers
-    const rowsWithSeller = rows.filter(r => hasValidSeller(r));
-    const rowsWithoutSeller = rows.filter(r => !hasValidSeller(r));
+    let rowsWithSeller = rows.filter(r => hasValidSeller(r));
+    let rowsWithoutSeller = rows.filter(r => !hasValidSeller(r));
     
     // Initialize update flags (used throughout the function)
     let needsUpdateFlag = false;
