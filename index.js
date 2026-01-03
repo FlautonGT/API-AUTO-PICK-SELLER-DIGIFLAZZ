@@ -1264,8 +1264,76 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         log(`  ⚠️ Code inconsistency detected!`, 'warning');
         log(`     Existing codes: ${consistencyCheck.existingCodes.join(', ')}`, 'info');
         log(`     Base codes found: ${consistencyCheck.baseCodes.join(', ')}`, 'info');
-        log(`     Will use base code: ${consistencyCheck.baseCode}`, 'info');
-        log(`  🔧 Fixing code consistency...`, 'info');
+        log(`  🔧 Fixing code consistency by generating NEW base code...`, 'info');
+        
+        // Generate NEW base code (don't use existing codes to avoid conflicts)
+        let newBaseCode;
+        try {
+            // Get all existing codes to exclude
+            const allExistingCodes = [];
+            rows.forEach((row) => {
+                if (row.code && row.code.trim() !== '') {
+                    const code = row.code.trim();
+                    allExistingCodes.push(code);
+                    // Also add base code and variants
+                    const baseCode = getBaseCode(code);
+                    if (baseCode) {
+                        allExistingCodes.push(baseCode);
+                        allExistingCodes.push(baseCode + CONFIG.BACKUP1_SUFFIX);
+                        allExistingCodes.push(baseCode + CONFIG.BACKUP2_SUFFIX);
+                    }
+                }
+            });
+            
+            // Add to STATE.generatedCodes to avoid conflicts
+            allExistingCodes.forEach(code => STATE.generatedCodes.add(code));
+            
+            // Get brand category name for AI generation
+            const brandCategoryName = rows[0]?.product_details?.brand_category?.name || 
+                                     rows[0]?.product_details?.type?.name || 
+                                     'Umum';
+            
+            log(`     🤖 Generating new base code (excluding: ${allExistingCodes.join(', ')})...`, 'info');
+            
+            // Try AI generation first
+            if (CONFIG.GROQ_API_KEY && CONFIG.GROQ_MODEL_PRODUCT_CODE) {
+                try {
+                    newBaseCode = await generateProductCodeAI(
+                        productName, 
+                        brandName, 
+                        categoryName, 
+                        brandCategoryName,
+                        allExistingCodes,
+                        0 // retryCount
+                    );
+                    log(`     ✅ AI generated new base code: ${newBaseCode}`, 'success');
+                } catch (aiErr) {
+                    log(`     ⚠️ AI generation failed: ${aiErr.message}, using fallback`, 'warning');
+                    newBaseCode = generateProductCode(productName, brandName);
+                    log(`     🔄 Fallback base code: ${newBaseCode}`, 'info');
+                }
+            } else {
+                // Fallback to script-based generation
+                newBaseCode = generateProductCode(productName, brandName);
+                log(`     ✅ Generated new base code: ${newBaseCode}`, 'success');
+            }
+            
+            // Track new codes
+            STATE.generatedCodes.add(newBaseCode);
+            STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP1_SUFFIX);
+            STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP2_SUFFIX);
+            
+        } catch (genErr) {
+            log(`     ❌ Failed to generate new base code: ${genErr.message}`, 'error');
+            STATE.errors.push({ 
+                product: productName, 
+                error: `Code consistency: Failed to generate new base code - ${genErr.message}` 
+            });
+            STATE.stats.errors += rows.length;
+            return; // Skip this product group
+        }
+        
+        log(`     📋 Will use new base code: ${newBaseCode}`, 'info');
         
         // Track rows that need to be updated via API
         const rowsToUpdateViaAPI = [];
@@ -1273,35 +1341,51 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         // Identify which row is MAIN, B1, B2 based on code suffix (not array position)
         const rowTypeMap = new Map(); // Map: rowId -> { row, expectedCode, rowType }
         
-        rows.forEach((row) => {
-            if (row.code && row.code.trim() !== '') {
-                const code = row.code.trim();
-                const baseCode = getBaseCode(code);
-                
-                // Determine row type based on code suffix, not array position
-                let rowType;
-                let expectedCode;
-                
-                if (code.endsWith(CONFIG.BACKUP2_SUFFIX)) {
-                    rowType = 'B2';
-                    expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP2_SUFFIX;
-                } else if (code.endsWith(CONFIG.BACKUP1_SUFFIX)) {
-                    rowType = 'B1';
-                    expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP1_SUFFIX;
-                } else {
-                    // No suffix = MAIN
-                    rowType = 'MAIN';
-                    expectedCode = consistencyCheck.baseCode;
-                }
-                
-                // Only update if code is different
-                if (code !== expectedCode) {
-                    log(`     🔄 Row ${row.id} (${rowType}): "${code}" → "${expectedCode}"`, 'info');
-                    rowTypeMap.set(row.id, { row, expectedCode, rowType });
-                    rowsToUpdateViaAPI.push({ ...row, code: expectedCode, rowType, rowId: row.id });
-                }
-            }
+        // Update ALL rows with new base code (MAIN, B1, B2)
+        // First, identify which row is MAIN, B1, B2 based on current code suffix
+        const mainRow = rows.find(row => {
+            if (!row.code || row.code.trim() === '') return false;
+            const code = row.code.trim();
+            return !code.endsWith(CONFIG.BACKUP1_SUFFIX) && !code.endsWith(CONFIG.BACKUP2_SUFFIX);
         });
+        const b1Row = rows.find(row => {
+            if (!row.code || row.code.trim() === '') return false;
+            return row.code.trim().endsWith(CONFIG.BACKUP1_SUFFIX);
+        });
+        const b2Row = rows.find(row => {
+            if (!row.code || row.code.trim() === '') return false;
+            return row.code.trim().endsWith(CONFIG.BACKUP2_SUFFIX);
+        });
+        
+        // Update MAIN row
+        if (mainRow) {
+            const expectedCode = newBaseCode;
+            if (mainRow.code.trim() !== expectedCode) {
+                log(`     🔄 Row ${mainRow.id} (MAIN): "${mainRow.code.trim()}" → "${expectedCode}"`, 'info');
+                rowTypeMap.set(mainRow.id, { row: mainRow, expectedCode, rowType: 'MAIN' });
+                rowsToUpdateViaAPI.push({ ...mainRow, code: expectedCode, rowType: 'MAIN', rowId: mainRow.id });
+            }
+        }
+        
+        // Update B1 row
+        if (b1Row) {
+            const expectedCode = newBaseCode + CONFIG.BACKUP1_SUFFIX;
+            if (b1Row.code.trim() !== expectedCode) {
+                log(`     🔄 Row ${b1Row.id} (B1): "${b1Row.code.trim()}" → "${expectedCode}"`, 'info');
+                rowTypeMap.set(b1Row.id, { row: b1Row, expectedCode, rowType: 'B1' });
+                rowsToUpdateViaAPI.push({ ...b1Row, code: expectedCode, rowType: 'B1', rowId: b1Row.id });
+            }
+        }
+        
+        // Update B2 row
+        if (b2Row) {
+            const expectedCode = newBaseCode + CONFIG.BACKUP2_SUFFIX;
+            if (b2Row.code.trim() !== expectedCode) {
+                log(`     🔄 Row ${b2Row.id} (B2): "${b2Row.code.trim()}" → "${expectedCode}"`, 'info');
+                rowTypeMap.set(b2Row.id, { row: b2Row, expectedCode, rowType: 'B2' });
+                rowsToUpdateViaAPI.push({ ...b2Row, code: expectedCode, rowType: 'B2', rowId: b2Row.id });
+            }
+        }
         
         // Update rows in memory
         rows = rows.map((row) => {
