@@ -1108,11 +1108,16 @@ const checkCodeConsistency = (rows) => {
         return { isConsistent: true, baseCode: '', needsFix: false };
     }
     
-    // Extract base codes from each row (considering their position)
+    // Extract base codes and identify code types (MAIN, B1, B2) based on suffix, not array position
     const baseCodes = [];
     const rowCodes = [];
+    const codeTypes = {
+        main: null,  // Code without suffix
+        b1: null,    // Code with B1 suffix
+        b2: null     // Code with B2 suffix
+    };
     
-    rows.forEach((row, idx) => {
+    rows.forEach((row) => {
         if (row.code && row.code.trim() !== '') {
             const code = row.code.trim();
             rowCodes.push(code);
@@ -1120,6 +1125,16 @@ const checkCodeConsistency = (rows) => {
             // Extract base code (remove B1/B2 suffix)
             const baseCode = getBaseCode(code);
             baseCodes.push(baseCode);
+            
+            // Identify code type based on suffix (not array position)
+            if (code.endsWith(CONFIG.BACKUP2_SUFFIX)) {
+                codeTypes.b2 = { code, baseCode, row };
+            } else if (code.endsWith(CONFIG.BACKUP1_SUFFIX)) {
+                codeTypes.b1 = { code, baseCode, row };
+            } else {
+                // No suffix = MAIN
+                codeTypes.main = { code, baseCode, row };
+            }
         }
     });
     
@@ -1127,36 +1142,38 @@ const checkCodeConsistency = (rows) => {
     
     // Check if all base codes are the same
     if (uniqueBaseCodes.length === 1) {
-        // Check if codes are correctly assigned to their positions
-        let needsPositionFix = false;
-        rows.forEach((row, idx) => {
-            if (row.code && row.code.trim() !== '') {
-                const code = row.code.trim();
-                const expectedCode = idx === 0 
-                    ? uniqueBaseCodes[0] 
-                    : (idx === 1 && rows.length >= 2 
-                        ? uniqueBaseCodes[0] + CONFIG.BACKUP1_SUFFIX 
-                        : (idx === 2 && rows.length >= 3 
-                            ? uniqueBaseCodes[0] + CONFIG.BACKUP2_SUFFIX 
-                            : code));
-                
-                if (code !== expectedCode) {
-                    needsPositionFix = true;
-                }
-            }
-        });
+        const baseCode = uniqueBaseCodes[0];
         
-        if (needsPositionFix) {
-            return { 
-                isConsistent: false, 
-                baseCode: uniqueBaseCodes[0], 
-                needsFix: true,
-                existingCodes: rowCodes,
-                baseCodes: uniqueBaseCodes
-            };
+        // Check if codes are correctly structured (MAIN, B1, B2) regardless of array order
+        const hasMain = codeTypes.main !== null && codeTypes.main.baseCode === baseCode;
+        const hasB1 = codeTypes.b1 !== null && codeTypes.b1.baseCode === baseCode;
+        const hasB2 = codeTypes.b2 !== null && codeTypes.b2.baseCode === baseCode;
+        
+        // Check if all existing codes match their expected format
+        let allCodesCorrect = true;
+        if (codeTypes.main && codeTypes.main.code !== baseCode) {
+            allCodesCorrect = false;
+        }
+        if (codeTypes.b1 && codeTypes.b1.code !== baseCode + CONFIG.BACKUP1_SUFFIX) {
+            allCodesCorrect = false;
+        }
+        if (codeTypes.b2 && codeTypes.b2.code !== baseCode + CONFIG.BACKUP2_SUFFIX) {
+            allCodesCorrect = false;
         }
         
-        return { isConsistent: true, baseCode: uniqueBaseCodes[0], needsFix: false };
+        // If all base codes are the same and all codes are correctly formatted, it's consistent
+        if (allCodesCorrect) {
+            return { isConsistent: true, baseCode: baseCode, needsFix: false };
+        }
+        
+        // Base codes are same but format is wrong (e.g., MAIN has B1 suffix)
+        return { 
+            isConsistent: false, 
+            baseCode: baseCode, 
+            needsFix: true,
+            existingCodes: rowCodes,
+            baseCodes: uniqueBaseCodes
+        };
     }
     
     // Inconsistent: multiple base codes found
@@ -1250,52 +1267,105 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         log(`     Will use base code: ${consistencyCheck.baseCode}`, 'info');
         log(`  🔧 Fixing code consistency...`, 'info');
         
-        // Update all rows to use consistent base code based on their position (MAIN, B1, B2)
-        rows = rows.map((row, idx) => {
+        // Track rows that need to be updated via API
+        const rowsToUpdateViaAPI = [];
+        
+        // Identify which row is MAIN, B1, B2 based on code suffix (not array position)
+        const rowTypeMap = new Map(); // Map: rowId -> { row, expectedCode, rowType }
+        
+        rows.forEach((row) => {
             if (row.code && row.code.trim() !== '') {
-                // Determine expected code based on row position
+                const code = row.code.trim();
+                const baseCode = getBaseCode(code);
+                
+                // Determine row type based on code suffix, not array position
+                let rowType;
                 let expectedCode;
-                if (idx === 0) {
-                    // Row 0 = MAIN: base code without suffix
-                    expectedCode = consistencyCheck.baseCode;
-                } else if (idx === 1 && rows.length >= 2) {
-                    // Row 1 = B1: base code + B1 suffix
-                    expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP1_SUFFIX;
-                } else if (idx === 2 && rows.length >= 3) {
-                    // Row 2 = B2: base code + B2 suffix
+                
+                if (code.endsWith(CONFIG.BACKUP2_SUFFIX)) {
+                    rowType = 'B2';
                     expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP2_SUFFIX;
+                } else if (code.endsWith(CONFIG.BACKUP1_SUFFIX)) {
+                    rowType = 'B1';
+                    expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP1_SUFFIX;
                 } else {
-                    // For rows beyond B2, keep existing code
-                    expectedCode = row.code.trim();
+                    // No suffix = MAIN
+                    rowType = 'MAIN';
+                    expectedCode = consistencyCheck.baseCode;
                 }
                 
                 // Only update if code is different
-                if (row.code.trim() !== expectedCode) {
-                    const rowType = idx === 0 ? 'MAIN' : (idx === 1 ? 'B1' : 'B2');
-                    log(`     🔄 Row ${idx + 1} (${rowType}): "${row.code.trim()}" → "${expectedCode}"`, 'info');
-                    return { ...row, code: expectedCode };
+                if (code !== expectedCode) {
+                    log(`     🔄 Row ${row.id} (${rowType}): "${code}" → "${expectedCode}"`, 'info');
+                    rowTypeMap.set(row.id, { row, expectedCode, rowType });
+                    rowsToUpdateViaAPI.push({ ...row, code: expectedCode, rowType, rowId: row.id });
                 }
-            } else {
-                // Row without code: assign based on position
-                let expectedCode;
-                if (idx === 0) {
-                    expectedCode = consistencyCheck.baseCode;
-                } else if (idx === 1 && rows.length >= 2) {
-                    expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP1_SUFFIX;
-                } else if (idx === 2 && rows.length >= 3) {
-                    expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP2_SUFFIX;
-                } else {
-                    expectedCode = '';
-                }
-                
-                if (expectedCode) {
-                    const rowType = idx === 0 ? 'MAIN' : (idx === 1 ? 'B1' : 'B2');
-                    log(`     🔄 Row ${idx + 1} (${rowType}): (empty) → "${expectedCode}"`, 'info');
-                    return { ...row, code: expectedCode };
-                }
+            }
+        });
+        
+        // Update rows in memory
+        rows = rows.map((row) => {
+            const updateInfo = rowTypeMap.get(row.id);
+            if (updateInfo) {
+                return { ...row, code: updateInfo.expectedCode };
             }
             return row;
         });
+        
+        // Update rows via API if needed
+        if (rowsToUpdateViaAPI.length > 0) {
+            log(`  💾 Updating ${rowsToUpdateViaAPI.length} row(s) via API...`, 'info');
+            
+            for (const rowToUpdate of rowsToUpdateViaAPI) {
+                try {
+                    // Prepare postData for API update
+                    const postData = {
+                        id: rowToUpdate.id,
+                        code: rowToUpdate.code,
+                        max_price: 0, // Set to 0 as per requirement
+                        product: rowToUpdate.product,
+                        product_id: rowToUpdate.product_id,
+                        product_details: rowToUpdate.product_details,
+                        description: rowToUpdate.description,
+                        price: rowToUpdate.price || 0,
+                        stock: rowToUpdate.stock || 0,
+                        start_cut_off: rowToUpdate.start_cut_off,
+                        end_cut_off: rowToUpdate.end_cut_off,
+                        unlimited_stock: rowToUpdate.unlimited_stock,
+                        faktur: rowToUpdate.faktur || false,
+                        multi: rowToUpdate.multi,
+                        multi_counter: rowToUpdate.multi_counter,
+                        seller_sku_id: rowToUpdate.seller_sku_id,
+                        seller_sku_id_int: rowToUpdate.seller_sku_id_int,
+                        seller: rowToUpdate.seller,
+                        seller_details: rowToUpdate.seller_details || {},
+                        status: rowToUpdate.status !== false, // Keep existing status or set to true
+                        last_update: rowToUpdate.last_update || '-',
+                        status_sellerSku: rowToUpdate.status_sellerSku || 1,
+                        sort_order: rowToUpdate.sort_order,
+                        seller_sku_desc: rowToUpdate.seller_sku_desc || '-',
+                        change: true,
+                    };
+                    
+                    await retry(() => api.saveProduct(postData));
+                    log(`     ✅ Updated row ${rowToUpdate.rowId} (${rowToUpdate.rowType}): "${rowToUpdate.code}"`, 'success');
+                    
+                    // Wait between API calls
+                    if (rowsToUpdateViaAPI.indexOf(rowToUpdate) < rowsToUpdateViaAPI.length - 1) {
+                        await wait(CONFIG.DELAY_BETWEEN_SAVES);
+                    }
+                } catch (updateErr) {
+                    log(`     ❌ Failed to update row ${rowToUpdate.rowId} (${rowToUpdate.rowType}): ${updateErr.message}`, 'error');
+                    STATE.errors.push({ 
+                        product: productName, 
+                        row: rowToUpdate.id, 
+                        code: rowToUpdate.code, 
+                        error: `Code consistency update: ${updateErr.message}` 
+                    });
+                    STATE.stats.errors++;
+                }
+            }
+        }
         
         log(`  ✅ Code consistency fixed`, 'success');
     }
