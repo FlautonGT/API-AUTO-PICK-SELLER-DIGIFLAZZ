@@ -1272,8 +1272,21 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     const isStatusOnlyUpdate = needsUpdateFlag && !needsNewSellerFlag;
     
     // If some rows don't have sellers, process only those (unless we're doing status-only update)
+    // Also collect existing seller IDs to exclude them from AI selection
+    const existingSellerIds = [];
+    if (rowsWithSeller.length > 0) {
+        rowsWithSeller.forEach(row => {
+            if (row.seller_sku_id) {
+                existingSellerIds.push(row.seller_sku_id);
+            }
+        });
+    }
+    
     if (rowsWithoutSeller.length > 0 && rowsWithSeller.length > 0 && !isStatusOnlyUpdate) {
         log(`  📊 Processing ${rowsWithoutSeller.length} row(s) without seller (${rowsWithSeller.length} already have seller)`, 'info');
+        if (existingSellerIds.length > 0) {
+            log(`  📋 Excluding ${existingSellerIds.length} existing seller(s) from AI selection to avoid duplicates`, 'info');
+        }
         rows = rowsWithoutSeller;
     }
 
@@ -1386,7 +1399,41 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 
                 // Determine how many sellers are needed based on rows
                 const neededSellers = rows.length >= 3 ? 3 : rows.length;
-                selectedSellers = await getAISellers(candidates, productName, usedList, [], neededSellers);
+                
+                // Exclude existing seller IDs to avoid duplicates (if some rows already have sellers)
+                const excludeIds = existingSellerIds.length > 0 ? existingSellerIds : [];
+                if (excludeIds.length > 0) {
+                    log(`  ⚠️ Excluding ${excludeIds.length} existing seller(s) from AI selection to avoid duplicates`, 'info');
+                }
+                
+                selectedSellers = await getAISellers(candidates, productName, usedList, excludeIds, neededSellers);
+                
+                // Double-check: if any selected seller matches existing sellers, request AI again with exclude
+                if (rowsWithSeller.length > 0 && selectedSellers.length > 0) {
+                    const duplicateSellers = selectedSellers.filter(aiSeller => {
+                        return rowsWithSeller.some(row => row.seller_sku_id === aiSeller.id);
+                    });
+                    
+                    if (duplicateSellers.length > 0) {
+                        log(`  ⚠️ AI selected ${duplicateSellers.length} seller(s) that already exist in other rows`, 'warning');
+                        duplicateSellers.forEach(dup => {
+                            const matchingRow = rowsWithSeller.find(row => row.seller_sku_id === dup.id);
+                            log(`     - "${dup.seller || dup.name}" (ID: ${dup.id}) already exists in row ${matchingRow?.id}`, 'warning');
+                        });
+                        
+                        // Add duplicate seller IDs to exclude list and request AI again
+                        const newExcludeIds = [...excludeIds, ...duplicateSellers.map(s => s.id)];
+                        log(`  🔄 Requesting AI again with ${newExcludeIds.length} excluded seller(s)...`, 'info');
+                        
+                        try {
+                            selectedSellers = await getAISellers(candidates, productName, usedList, newExcludeIds, neededSellers);
+                            log(`  ✅ AI re-selected ${selectedSellers.length} seller(s) (excluding duplicates)`, 'success');
+                        } catch (retryErr) {
+                            log(`  ⚠️ AI re-selection failed: ${retryErr.message}`, 'warning');
+                            // Continue with original selection (will cause duplicate error, but handled by duplicate error handler)
+                        }
+                    }
+                }
 
         if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
                 selectedSellers.forEach(s => STATE.usedSellers.get(usedKey).push(s.seller || s.name));
@@ -2032,20 +2079,31 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     log(`  ❌ No sellers available after filtering`, 'error');
                     STATE.errors.push({ product: productName, error: 'No sellers available after duplicate error' });
                     STATE.stats.errors += rows.length;
-                    return;
+                    return new Map();
                 }
                 
                 // Re-select all sellers (exclude only for this retry, not permanently)
                 // Note: usedSellerIds are NOT problematic sellers - they just caused duplicate
                 // They can be included again in future attempts if needed
                 const neededSellers = rows.length >= 3 ? 3 : rows.length;
+                
+                // If excluding sellers would leave us with too few sellers, don't exclude them
+                // (they're not problematic, just caused duplicate - can try again)
+                const availableAfterExclude = freshSellers.filter(s => !usedSellerIds.includes(s.id));
+                if (availableAfterExclude.length < neededSellers) {
+                    log(`  ⚠️ Too few sellers after excluding duplicates (${availableAfterExclude.length} < ${neededSellers})`, 'warning');
+                    log(`  💡 Not excluding duplicate sellers - will try with all available sellers`, 'info');
+                    // Don't exclude - use all available sellers
+                }
+                
                 const candidates = prepareSellersForAI(freshSellers, neededSellers);
                 const usedKey = `${categoryName}-${brandName}`;
                 const usedList = STATE.usedSellers.get(usedKey) || [];
                 
                 try {
-                    // Pass usedSellerIds to exclude only for this retry (not problematicSellerIds)
-                    const newSelectedSellers = await getAISellers(candidates, productName, usedList, usedSellerIds, neededSellers);
+                    // Only exclude if we have enough sellers after exclusion
+                    const excludeIds = availableAfterExclude.length >= neededSellers ? usedSellerIds : [];
+                    const newSelectedSellers = await getAISellers(candidates, productName, usedList, excludeIds, neededSellers);
                     
                     // Update used sellers
                     if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
@@ -2111,7 +2169,8 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     log(`  ❌ AI re-selection failed: ${aiErr.message}`, 'error');
                     STATE.errors.push({ product: productName, error: `AI re-selection: ${aiErr.message}` });
                     STATE.stats.errors += rows.length;
-                    return;
+                    // Return empty Map to indicate failure
+                    return new Map();
                 }
             } else {
                 // Not a duplicate seller error or max retries reached - re-throw
@@ -2122,6 +2181,12 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     
     // Start processing and get final result
     const finalSellerToRowMap = await processSellersWithRetry(sellerToRowMap);
+    
+    // Check if processing failed (empty Map returned)
+    if (!finalSellerToRowMap || finalSellerToRowMap.size === 0) {
+        log(`  ❌ Failed to process sellers`, 'error');
+        return;
+    }
     
     if (finalSellerToRowMap.size < rows.length && CONFIG.SKIP_IF_CODES_COMPLETE) {
         const skipped = rows.length - finalSellerToRowMap.size;
