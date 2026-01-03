@@ -513,7 +513,7 @@ STEP 1 - BLACKLIST (filter dulu, JANGAN pilih seller dengan ciri ini):
 - Deskripsi mengandung: "pulsa transfer", "paket transfer" (bukan stok sendiri)
 - Deskripsi terlalu singkat atau hanya nama produk (contoh: "telkomsel 2000")
 - Deskripsi kosong atau hanya "-"
-- Multi Wajib ${CONFIG.REQUIRE_MULTI ? 'true' : 'false'}
+- Prioritaskan Multi = True, jika tidak ada seller dengan Multi = False boleh dimasukkan
 - Faktur Wajib ${CONFIG.REQUIRE_FP ? 'true' : 'false'}
 
 STEP 2 - PILIH SELLER (dari yang lolos blacklist):
@@ -1358,25 +1358,40 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     
     if (someRowsHaveCodes && !shouldGenerateNew && CONFIG.SKIP_IF_CODES_COMPLETE) {
         // Extract base code from existing codes (only if we're NOT generating new code)
+        // Priority: MAIN code first, then B1, then B2
         log(`  🏷️ Some rows have codes - extracting base code...`, 'info');
         const existingCodes = rowsWithCodes.filter(r => r.hasCode).map(r => r.code);
-        const existingBaseCodes = rowsWithCodes.filter(r => r.hasCode).map(r => r.baseCode).filter(b => b !== '');
         
-        log(`     Existing codes: ${existingCodes.join(', ')}`, 'info');
-        
-        if (existingBaseCodes.length > 0) {
-            // Use the most common base code
-            const baseCodeCount = {};
-            existingBaseCodes.forEach(b => baseCodeCount[b] = (baseCodeCount[b] || 0) + 1);
-            const sorted = Object.entries(baseCodeCount).sort((a, b) => b[1] - a[1]);
-            baseCode = sorted[0][0];
-            log(`     ✅ Extracted base code: ${baseCode} (from ${existingCodes.length} existing code(s))`, 'success');
-        } else {
-            // If no valid base code found, try to extract from first code
-            const firstCode = existingCodes[0];
-            baseCode = getBaseCode(firstCode);
+        // Check if MAIN row (first row) has code - prioritize MAIN
+        const mainRow = rows[0];
+        if (mainRow && mainRow.code && mainRow.code.trim() !== '') {
+            const mainCode = mainRow.code.trim();
+            baseCode = getBaseCode(mainCode);
             if (baseCode) {
-                log(`     ✅ Extracted base code: ${baseCode} (from ${firstCode})`, 'success');
+                log(`     ✅ Extracted base code from MAIN: ${baseCode} (from ${mainCode})`, 'success');
+                log(`     📝 B1 and B2 will follow MAIN base code: ${baseCode}`, 'info');
+            }
+        }
+        
+        // If MAIN doesn't have code, try to extract from other rows
+        if (!baseCode) {
+            const existingBaseCodes = rowsWithCodes.filter(r => r.hasCode).map(r => r.baseCode).filter(b => b !== '');
+            log(`     Existing codes: ${existingCodes.join(', ')}`, 'info');
+            
+            if (existingBaseCodes.length > 0) {
+                // Use the most common base code
+                const baseCodeCount = {};
+                existingBaseCodes.forEach(b => baseCodeCount[b] = (baseCodeCount[b] || 0) + 1);
+                const sorted = Object.entries(baseCodeCount).sort((a, b) => b[1] - a[1]);
+                baseCode = sorted[0][0];
+                log(`     ✅ Extracted base code: ${baseCode} (from ${existingCodes.length} existing code(s))`, 'success');
+            } else {
+                // If no valid base code found, try to extract from first code
+                const firstCode = existingCodes[0];
+                baseCode = getBaseCode(firstCode);
+                if (baseCode) {
+                    log(`     ✅ Extracted base code: ${baseCode} (from ${firstCode})`, 'success');
+                }
             }
         }
     }
@@ -1661,8 +1676,13 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         while (!saveSuccess && retryCount < maxRetriesForKTPError) {
             try {
                 if (retryCount > 0) {
-                    log(`     🔄 Retry attempt ${retryCount}/${maxRetriesForKTPError} with new seller...`, 'info');
-                    log(`     New Seller: ${currentSeller.seller || currentSeller.name} @ ${formatRp(currentSeller.price)}`, 'info');
+                    log(`     🔄 Retry attempt ${retryCount}/${maxRetriesForKTPError}...`, 'info');
+                    if (currentSeller.seller !== seller.seller) {
+                        log(`     New Seller: ${currentSeller.seller || currentSeller.name} @ ${formatRp(currentSeller.price)}`, 'info');
+                    }
+                    if (finalCode !== mappedCode) {
+                        log(`     New Code: ${finalCode} (was: ${mappedCode})`, 'info');
+                    }
                 } else {
                     log(`     💾 Saving to API...`, 'save');
                 }
@@ -1673,14 +1693,15 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     throw new Error(`Invalid seller price: ${sellerPrice} for seller ${currentSeller.seller || currentSeller.name}`);
                 }
 
-        const postData = {
-            id: row.id,
+                // Create postData with current finalCode (will be updated if code is taken)
+                const postData = {
+                    id: row.id,
                     code: finalCode,
-            max_price: maxPrice,
-            product: row.product,
-            product_id: row.product_id,
-            product_details: row.product_details,
-            description: row.description,
+                    max_price: maxPrice,
+                    product: row.product,
+                    product_id: row.product_id,
+                    product_details: row.product_details,
+                    description: row.description,
                     price: sellerPrice,
                     stock: currentSeller.stock || 0,
                     start_cut_off: currentSeller.start_cut_off,
@@ -1694,12 +1715,12 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     seller: currentSeller.seller,
                     seller_details: currentSeller.seller_details || {},
                     status: true, // Always set to true
-            last_update: row.last_update || '-',
+                    last_update: row.last_update || '-',
                     status_sellerSku: 1, // Always set to 1 (aktif, bukan gangguan)
-            sort_order: row.sort_order,
+                    sort_order: row.sort_order,
                     seller_sku_desc: currentSeller.deskripsi || '-',
-            change: true,
-        };
+                    change: true,
+                };
 
             await retry(() => api.saveProduct(postData));
                 log(`     ✅ Saved successfully!`, 'success');
@@ -1794,6 +1815,98 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     } catch (aiErr) {
                         log(`     ❌ AI replacement failed: ${aiErr.message}`, 'error');
                         throw e; // Re-throw original error
+                    }
+                } else if (e.statusCode === 422 || (e.message && e.message.includes('422'))) {
+                    // Check if it's "Kode Produk sudah diambil" error (422)
+                    const errorText = e.responseText || e.message || '';
+                    const isCodeTakenError = errorText.toLowerCase().includes('kode produk sudah diambil') || 
+                                           errorText.toLowerCase().includes('code already taken') ||
+                                           errorText.toLowerCase().includes('sudah diambil');
+                    
+                    if (isCodeTakenError) {
+                        log(`     ⚠️ Code "${finalCode}" already taken - requesting AI to generate new code...`, 'warning');
+                        
+                        // Get used codes (including current one and all generated codes)
+                        const usedCodes = Array.from(STATE.generatedCodes);
+                        if (finalCode && !usedCodes.includes(finalCode)) {
+                            usedCodes.push(finalCode);
+                        }
+                        
+                        // Generate new code using AI
+                        try {
+                            const brandCategoryName = row.product_details?.brand_category?.name || 
+                                                     row.product_details?.type?.name || 
+                                                     'Umum';
+                            
+                            log(`     🤖 Asking AI for new product code (excluding: ${usedCodes.join(', ')})...`, 'info');
+                            const newBaseCode = await generateProductCodeAI(
+                                productName, 
+                                brandName, 
+                                categoryName, 
+                                brandCategoryName,
+                                usedCodes,
+                                1 // retryCount
+                            );
+                            
+                            // Determine new code based on seller type
+                            let newCode;
+                            if (seller.type === 'MAIN') {
+                                newCode = newBaseCode;
+                            } else if (seller.type === 'B1') {
+                                newCode = newBaseCode + CONFIG.BACKUP1_SUFFIX;
+                            } else if (seller.type === 'B2') {
+                                newCode = newBaseCode + CONFIG.BACKUP2_SUFFIX;
+                            } else {
+                                newCode = newBaseCode;
+                            }
+                            
+                            log(`     ✅ AI generated new code: ${newCode}`, 'success');
+                            
+                            // Update finalCode and retry
+                            finalCode = newCode;
+                            
+                            // Track new codes
+                            STATE.generatedCodes.add(newBaseCode);
+                            STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP1_SUFFIX);
+                            STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP2_SUFFIX);
+                            
+                            retryCount++;
+                            await wait(1000); // Wait before retry
+                            continue; // Retry with new code
+                            
+                        } catch (aiErr) {
+                            log(`     ❌ AI code generation failed: ${aiErr.message}`, 'error');
+                            // Fallback to script-based generation
+                            const fallbackBaseCode = generateProductCode(productName, brandName);
+                            let fallbackCode;
+                            if (seller.type === 'MAIN') {
+                                fallbackCode = fallbackBaseCode;
+                            } else if (seller.type === 'B1') {
+                                fallbackCode = fallbackBaseCode + CONFIG.BACKUP1_SUFFIX;
+                            } else if (seller.type === 'B2') {
+                                fallbackCode = fallbackBaseCode + CONFIG.BACKUP2_SUFFIX;
+                            } else {
+                                fallbackCode = fallbackBaseCode;
+                            }
+                            
+                            log(`     🔄 Using fallback code: ${fallbackCode}`, 'info');
+                            finalCode = fallbackCode;
+                            
+                            // Track fallback codes
+                            STATE.generatedCodes.add(fallbackBaseCode);
+                            STATE.generatedCodes.add(fallbackBaseCode + CONFIG.BACKUP1_SUFFIX);
+                            STATE.generatedCodes.add(fallbackBaseCode + CONFIG.BACKUP2_SUFFIX);
+                            
+                            retryCount++;
+                            await wait(1000);
+                            continue; // Retry with fallback code
+                        }
+                    } else {
+                        // Other 422 errors - just throw
+                        log(`     ❌ Save failed: ${e.message}`, 'error');
+                        STATE.errors.push({ product: productName, seller: currentSeller.seller || currentSeller.name, code: finalCode, error: e.message });
+                        STATE.stats.errors++;
+                        break; // Exit retry loop
                     }
                 } else {
                     // Other errors - just throw
