@@ -610,11 +610,14 @@ const callGPTAPI = async (userMessage) => {
 };
 
 const getAISellers = async (sellers, productName, usedSellers = [], excludeSellerIds = [], neededSellers = 3) => {
-    // Filter out excluded sellers (yang bermasalah)
+    // Filter out excluded sellers
+    // excludeSellerIds can contain:
+    // - Problematic sellers (KTP/PPh22 error) - should be permanently excluded
+    // - Duplicate sellers (duplicate error) - excluded only for this retry, can be included again
     const availableSellers = sellers.filter(s => !excludeSellerIds.includes(s.id));
     
     if (availableSellers.length === 0) {
-        throw new Error('No sellers available after excluding problematic sellers');
+        throw new Error('No sellers available after excluding sellers');
     }
     
     const sellerData = availableSellers.map(s => ({
@@ -652,7 +655,8 @@ ${JSON.stringify(sellerData)}`;
     log('  Asking AI for seller selection...', 'ai');
     log(`  📊 Sending ${sellerData.length} candidates to AI`, 'info');
     if (excludeSellerIds.length > 0) {
-        log(`  ⚠️ Excluding ${excludeSellerIds.length} problematic seller(s)`, 'warning');
+        // excludeSellerIds can contain problematic sellers (KTP error) or just excluded sellers (duplicate error)
+        log(`  ⚠️ Excluding ${excludeSellerIds.length} seller(s)`, 'warning');
     }
     
     const result = await retry(() => callGPTAPI(userMessage));
@@ -1144,6 +1148,9 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     log(`\n📦 ${productName} (${rows.length} rows)`, 'product');
     log(`  📋 Mode: ${CONFIG.MODE}`, 'info');
 
+    // Store original rows count for stats
+    const originalRowsCount = rows.length;
+
     // Check if all rows already have valid sellers
     let rowsWithSeller = rows.filter(r => hasValidSeller(r));
     let rowsWithoutSeller = rows.filter(r => !hasValidSeller(r));
@@ -1172,6 +1179,15 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         }
         log(`  🔄 Mode UNSET: Processing ${rowsWithoutCode.length} row(s) without codes`, 'info');
         rows = rowsWithoutCode; // Only process rows without codes
+        
+        // If no rows without codes, skip
+        if (rows.length === 0) {
+            log(`  ✅ No rows without codes, skipping (UNSET mode)`, 'skip');
+            STATE.skipped.push({ product: productName, reason: 'No rows without codes (UNSET mode)' });
+            STATE.stats.skipped += originalRowsCount;
+            return;
+        }
+        
         rowsWithSeller = rows.filter(r => hasValidSeller(r));
         rowsWithoutSeller = rows.filter(r => !hasValidSeller(r));
     } else if (CONFIG.MODE === 'DISTURBANCE') {
@@ -1297,6 +1313,14 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         log(`  💰 Max price: ${formatRp(maxPrice)} (set to 0)`, 'info');
     } else {
         // Need new sellers - get from API
+        // Check if rows is not empty
+        if (!rows || rows.length === 0 || !rows[0] || !rows[0].id) {
+            log(`  ❌ No rows available to get sellers`, 'error');
+            STATE.errors.push({ product: productName, error: 'No rows available to get sellers' });
+            STATE.stats.errors += rows.length || 1;
+            return;
+        }
+        
     let sellers;
     try {
         sellers = await retry(() => api.getSellers(rows[0].id));
@@ -1979,11 +2003,20 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 log(`  ⚠️ Duplicate seller error detected - replacing ALL sellers (MAIN, B1, B2)`, 'warning');
                 log(`  🔄 Retry attempt ${retryCount + 1}/${maxDuplicateSellerRetries}...`, 'info');
                 
-                // Collect all used seller IDs
+                // Collect all used seller IDs (only for this retry, not problematic)
+                // These sellers are not problematic - they just caused duplicate, so exclude only for this retry
                 const usedSellerIds = e.usedSellerIds || Array.from(sellerToRowMap.values()).map(m => m.seller.id).filter(Boolean);
-                log(`  📋 Excluding ${usedSellerIds.length} seller(s) that caused duplicates`, 'info');
+                log(`  📋 Excluding ${usedSellerIds.length} seller(s) that caused duplicates (not problematic, just for this retry)`, 'info');
                 
                 // Get fresh sellers
+                // Check if rows is not empty
+                if (!rows || rows.length === 0 || !rows[0] || !rows[0].id) {
+                    log(`  ❌ No rows available to get fresh sellers`, 'error');
+                    STATE.errors.push({ product: productName, error: 'No rows available to get fresh sellers' });
+                    STATE.stats.errors += rows.length || 1;
+                    return;
+                }
+                
                 let freshSellers;
                 try {
                     freshSellers = await retry(() => api.getSellers(rows[0].id));
@@ -2002,13 +2035,16 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     return;
                 }
                 
-                // Re-select all sellers with excluded problematic sellers
+                // Re-select all sellers (exclude only for this retry, not permanently)
+                // Note: usedSellerIds are NOT problematic sellers - they just caused duplicate
+                // They can be included again in future attempts if needed
                 const neededSellers = rows.length >= 3 ? 3 : rows.length;
                 const candidates = prepareSellersForAI(freshSellers, neededSellers);
                 const usedKey = `${categoryName}-${brandName}`;
                 const usedList = STATE.usedSellers.get(usedKey) || [];
                 
                 try {
+                    // Pass usedSellerIds to exclude only for this retry (not problematicSellerIds)
                     const newSelectedSellers = await getAISellers(candidates, productName, usedList, usedSellerIds, neededSellers);
                     
                     // Update used sellers
