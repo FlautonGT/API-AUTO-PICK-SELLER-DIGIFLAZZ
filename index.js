@@ -795,14 +795,46 @@ const generateProductCode = (productName, brandName = '') => {
 
     // Use max length from config, but default to 10 if not set (same as old_file.js)
     const maxLength = CONFIG.CODE_MAX_LENGTH || 10;
-    let baseCode = (brand + nominal).substring(0, maxLength);
+    
+    // Add variation to make codes more unique
+    const variations = [
+        '', // Standard: brand + nominal
+        'PUL', // Add PUL for pulsa
+        'K', // Add K for thousands
+        'RB', // Add RB for ribu
+    ];
+    
+    // Randomly select a variation (or use timestamp-based for more randomness)
+    const variationIndex = Math.floor(Math.random() * variations.length);
+    const variation = variations[variationIndex];
+    
+    // Build base code with variation
+    let baseCode = (brand + variation + nominal).substring(0, maxLength);
+    
+    // If still too long, try without variation
+    if (baseCode.length > maxLength) {
+        baseCode = (brand + nominal).substring(0, maxLength);
+    }
+    
     let code = baseCode;
     let suffix = 1;
 
     while (STATE.generatedCodes.has(code)) {
-        code = baseCode + suffix++;
+        // Try different variations if code is taken
+        if (suffix <= variations.length) {
+            const altVariation = variations[(variationIndex + suffix) % variations.length];
+            code = (brand + altVariation + nominal).substring(0, maxLength);
+            if (code.length > maxLength) {
+                code = (brand + nominal).substring(0, maxLength);
+            }
+        } else {
+            code = baseCode + suffix++;
+        }
+        
         if (suffix > 99) {
-            code = baseCode + Date.now().toString().slice(-4);
+            // Use timestamp + random for maximum uniqueness
+            const randomSuffix = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+            code = baseCode.substring(0, Math.max(1, maxLength - 3)) + randomSuffix;
             break;
         }
     }
@@ -827,6 +859,11 @@ TUGAS: Generate kode produk singkat berdasarkan KATEGORI, BRAND KATEGORI, BRAND,
 - Hanya HURUF KAPITAL dan ANGKA (tanpa simbol, spasi, atau underscore)
 - Format: [BRAND][KATEGORI_SUFFIX][BRAND_KATEGORI][NOMINAL/UNIT]
 - Kode harus UNIK dan MUDAH DIBACA
+- PENTING: Gunakan VARIASI KREATIF! Jangan selalu format yang sama!
+- Bisa singkat (5-8 char) atau agak panjang (10-15 char), sesuai kreativitas
+- Contoh variasi untuk produk yang sama:
+  * Telkomsel 5000: TSELP5, TSELPUL5, TSEL5K, TSEL5RB, TSEL5000, TSELP5K
+  * Indosat 10000: ISATP10, ISATPUL10, ISAT10K, ISAT10RB, ISAT10000
 
 === SINGKATAN BRAND (2-4 huruf) ===
 - TELKOMSEL → TSEL
@@ -874,17 +911,18 @@ TUGAS: Generate kode produk singkat berdasarkan KATEGORI, BRAND KATEGORI, BRAND,
 - Thailand → TH
 - (Lainnya → 2 huruf pertama)
 
-=== FORMAT NOMINAL ===
-- Ribuan: Hilangkan 000, tanpa suffix K
-  - 5.000 / 5000 → 5
-  - 10.000 → 10
-  - 25.000 → 25
-  - 100.000 → 100
-- Puluhan ribu langsung: 15000 → 15, 50000 → 50
-- Ratusan ribu: 100000 → 100, 500000 → 500
+=== FORMAT NOMINAL (VARIASI KREATIF) ===
+- Ribuan: Bisa berbagai format
+  - 5.000 / 5000 → 5, 5K, 5RB, 5000, PUL5, P5
+  - 10.000 → 10, 10K, 10RB, 10000, PUL10, P10
+  - 25.000 → 25, 25K, 25RB, 25000, PUL25, P25
+  - 100.000 → 100, 100K, 100RB, 100000, PUL100, P100
+- Puluhan ribu: 15000 → 15, 15K, 15RB, 15000, PUL15, P15
+- Ratusan ribu: 100000 → 100, 100K, 100RB, 100000, PUL100, P100
+- Gunakan variasi: kadang singkat (5), kadang dengan suffix (5K, 5RB), kadang full (5000)
 
 Penempatan: Di AKHIR kode
-Contoh: TSELD1GUM (Telkomsel Data 1GB UnlimitedMax)
+Contoh variasi: TSELD1GUM, TSEL1GUM, TSEL1GBUM, TSELD1G (Telkomsel Data 1GB UnlimitedMax)
 
 === PRIORITAS JIKA > 10 KARAKTER ===
 Jika kombinasi melebihi 10 karakter, potong dengan prioritas:
@@ -916,7 +954,7 @@ const callGroqAPI = async (userMessage, systemPrompt, modelName) => {
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userMessage }
             ],
-            temperature: 0.1,
+            temperature: 0.7, // Increased from 0.1 to 0.7 for more creativity and variation
             max_tokens: 1000,
             response_format: { type: "json_object" }
         })
@@ -967,6 +1005,13 @@ const generateProductCodeAI = async (productName, brandName = '', categoryName =
         if (usedCodes.length > 0) {
             userMessage += `\n\nKODE YANG SUDAH DIPAKAI (JANGAN PAKAI INI): ${usedCodes.join(', ')}`;
             userMessage += `\nGenerate kode BARU yang BERBEDA dan UNIK!`;
+            userMessage += `\nGunakan variasi kreatif: bisa singkat, bisa panjang, bisa dengan format berbeda!`;
+            userMessage += `\nContoh variasi untuk Telkomsel 5000: TSELP5, TSELPUL5, TSEL5K, TSEL5RB, TSEL5000, dll`;
+        } else {
+            // Even for first attempt, ask for variety
+            userMessage += `\n\nPENTING: Gunakan variasi kreatif dalam format kode!`;
+            userMessage += `\nTidak harus selalu format standar, bisa variasi singkat/panjang sesuai kreativitas.`;
+            userMessage += `\nContoh variasi untuk Telkomsel 5000: TSELP5, TSELPUL5, TSEL5K, TSEL5RB, TSEL5000, dll`;
         }
 
         const logMsg = retryCount > 0
@@ -1839,6 +1884,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                                                      'Umum';
                             
                             log(`     🤖 Asking AI for new product code (excluding: ${usedCodes.join(', ')})...`, 'info');
+                            log(`     💡 Requesting VARIASI KREATIF yang berbeda dari kode sebelumnya!`, 'info');
                             const newBaseCode = await generateProductCodeAI(
                                 productName, 
                                 brandName, 
