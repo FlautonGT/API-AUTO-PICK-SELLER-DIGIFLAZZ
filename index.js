@@ -1108,12 +1108,54 @@ const checkCodeConsistency = (rows) => {
         return { isConsistent: true, baseCode: '', needsFix: false };
     }
     
-    // Extract base codes
-    const baseCodes = rowsWithCodes.map(r => getBaseCode(r.code.trim()));
+    // Extract base codes from each row (considering their position)
+    const baseCodes = [];
+    const rowCodes = [];
+    
+    rows.forEach((row, idx) => {
+        if (row.code && row.code.trim() !== '') {
+            const code = row.code.trim();
+            rowCodes.push(code);
+            
+            // Extract base code (remove B1/B2 suffix)
+            const baseCode = getBaseCode(code);
+            baseCodes.push(baseCode);
+        }
+    });
+    
     const uniqueBaseCodes = [...new Set(baseCodes.filter(b => b !== ''))];
     
     // Check if all base codes are the same
     if (uniqueBaseCodes.length === 1) {
+        // Check if codes are correctly assigned to their positions
+        let needsPositionFix = false;
+        rows.forEach((row, idx) => {
+            if (row.code && row.code.trim() !== '') {
+                const code = row.code.trim();
+                const expectedCode = idx === 0 
+                    ? uniqueBaseCodes[0] 
+                    : (idx === 1 && rows.length >= 2 
+                        ? uniqueBaseCodes[0] + CONFIG.BACKUP1_SUFFIX 
+                        : (idx === 2 && rows.length >= 3 
+                            ? uniqueBaseCodes[0] + CONFIG.BACKUP2_SUFFIX 
+                            : code));
+                
+                if (code !== expectedCode) {
+                    needsPositionFix = true;
+                }
+            }
+        });
+        
+        if (needsPositionFix) {
+            return { 
+                isConsistent: false, 
+                baseCode: uniqueBaseCodes[0], 
+                needsFix: true,
+                existingCodes: rowCodes,
+                baseCodes: uniqueBaseCodes
+            };
+        }
+        
         return { isConsistent: true, baseCode: uniqueBaseCodes[0], needsFix: false };
     }
     
@@ -1133,7 +1175,7 @@ const checkCodeConsistency = (rows) => {
         isConsistent: false, 
         baseCode: mostCommonBaseCode, 
         needsFix: true,
-        existingCodes: rowsWithCodes.map(r => r.code.trim()),
+        existingCodes: rowCodes,
         baseCodes: uniqueBaseCodes
     };
 };
@@ -1208,19 +1250,47 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         log(`     Will use base code: ${consistencyCheck.baseCode}`, 'info');
         log(`  🔧 Fixing code consistency...`, 'info');
         
-        // Update all rows to use consistent base code
+        // Update all rows to use consistent base code based on their position (MAIN, B1, B2)
         rows = rows.map((row, idx) => {
             if (row.code && row.code.trim() !== '') {
-                const expectedCode = idx === 0 
-                    ? consistencyCheck.baseCode 
-                    : (idx === 1 && rows.length >= 2 
-                        ? consistencyCheck.baseCode + CONFIG.BACKUP1_SUFFIX 
-                        : (idx === 2 && rows.length >= 3 
-                            ? consistencyCheck.baseCode + CONFIG.BACKUP2_SUFFIX 
-                            : row.code));
+                // Determine expected code based on row position
+                let expectedCode;
+                if (idx === 0) {
+                    // Row 0 = MAIN: base code without suffix
+                    expectedCode = consistencyCheck.baseCode;
+                } else if (idx === 1 && rows.length >= 2) {
+                    // Row 1 = B1: base code + B1 suffix
+                    expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP1_SUFFIX;
+                } else if (idx === 2 && rows.length >= 3) {
+                    // Row 2 = B2: base code + B2 suffix
+                    expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP2_SUFFIX;
+                } else {
+                    // For rows beyond B2, keep existing code
+                    expectedCode = row.code.trim();
+                }
                 
+                // Only update if code is different
                 if (row.code.trim() !== expectedCode) {
-                    log(`     🔄 Row ${idx + 1}: "${row.code.trim()}" → "${expectedCode}"`, 'info');
+                    const rowType = idx === 0 ? 'MAIN' : (idx === 1 ? 'B1' : 'B2');
+                    log(`     🔄 Row ${idx + 1} (${rowType}): "${row.code.trim()}" → "${expectedCode}"`, 'info');
+                    return { ...row, code: expectedCode };
+                }
+            } else {
+                // Row without code: assign based on position
+                let expectedCode;
+                if (idx === 0) {
+                    expectedCode = consistencyCheck.baseCode;
+                } else if (idx === 1 && rows.length >= 2) {
+                    expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP1_SUFFIX;
+                } else if (idx === 2 && rows.length >= 3) {
+                    expectedCode = consistencyCheck.baseCode + CONFIG.BACKUP2_SUFFIX;
+                } else {
+                    expectedCode = '';
+                }
+                
+                if (expectedCode) {
+                    const rowType = idx === 0 ? 'MAIN' : (idx === 1 ? 'B1' : 'B2');
+                    log(`     🔄 Row ${idx + 1} (${rowType}): (empty) → "${expectedCode}"`, 'info');
                     return { ...row, code: expectedCode };
                 }
             }
