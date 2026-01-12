@@ -1,14 +1,18 @@
 # Old browser version file
 old_file.js
+add-product.js
+delete-all-product.js
+tmpclaude*
+response_digiflazz.json
 
 # IDE files
 .idea/
+.claude/
 
 # Environment variables (sensitive data)
 .env
 
 # Logs
-logs/
 *.log
 
 # Node modules (if any)
