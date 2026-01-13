@@ -93,6 +93,28 @@ const retry = async (fn, maxRetries = CONFIG.MAX_RETRIES, delay = CONFIG.RETRY_D
             return await fn();
         } catch (e) {
             lastError = e;
+
+            // Don't retry 422 "Kode Produk sudah diambil" errors - these need new code generation
+            const errorText = e.responseText || e.message || '';
+            const isCodeTakenError = (e.statusCode === 422 || errorText.includes('422')) &&
+                                    (errorText.toLowerCase().includes('kode produk sudah diambil') ||
+                                     errorText.toLowerCase().includes('code already taken') ||
+                                     errorText.toLowerCase().includes('sudah diambil'));
+
+            // Don't retry 400 "Produk dan Seller sudah ada" (duplicate seller) errors
+            const isDuplicateSellerError = (e.statusCode === 400 || errorText.includes('400')) &&
+                                          (errorText.toLowerCase().includes('sudah ada sebelumnya') ||
+                                           errorText.toLowerCase().includes('already exists') ||
+                                           errorText.toLowerCase().includes('duplicate'));
+
+            // Don't retry KTP/PPh22 errors
+            const isKTPError = e.isKTPError || errorText.toLowerCase().includes('ktp') || errorText.toLowerCase().includes('pph22');
+
+            if (isCodeTakenError || isDuplicateSellerError || isKTPError) {
+                log(`Non-retryable error detected, throwing immediately: ${e.message}`, 'warning');
+                throw e;
+            }
+
             if (i < maxRetries - 1) {
                 log(`Retry ${i + 1}/${maxRetries}: ${e.message}`, 'warning');
                 await wait(delay);
