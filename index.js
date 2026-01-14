@@ -195,14 +195,18 @@ const api = {
                 headers: { ...headers, ...options.headers },
             });
 
-            // Handle rate limit (429) - sleep 15 seconds
+            // Handle rate limit (429) with exponential backoff
             if (res.status === 429) {
-                log(`🚨 Rate limit detected (429) on ${endpoint}`, 'error');
-                log(`⏸️  Sleeping for ${CONFIG.RATE_LIMIT_SLEEP_DURATION / 1000} seconds...`, 'warning');
-                await wait(CONFIG.RATE_LIMIT_SLEEP_DURATION);
+                const rateLimitRetry = options._rateLimitRetry || 0;
+                if (rateLimitRetry >= CONFIG.MAX_RATE_LIMIT_RETRIES) {
+                    throw new Error(`Digiflazz API rate limit exceeded after ${rateLimitRetry} retries on ${endpoint}`);
+                }
+                const sleepDuration = CONFIG.RATE_LIMIT_SLEEP_DURATION * Math.pow(2, rateLimitRetry);
+                log(`🚨 Rate limit detected (429) on ${endpoint} - retry ${rateLimitRetry + 1}/${CONFIG.MAX_RATE_LIMIT_RETRIES}`, 'error');
+                log(`⏸️  Sleeping for ${sleepDuration / 1000} seconds (exponential backoff)...`, 'warning');
+                await wait(sleepDuration);
                 log(`✅ Rate limit sleep completed, retrying...`, 'success');
-                // Retry once after sleep
-                return await this.request(endpoint, options);
+                return await this.request(endpoint, { ...options, _rateLimitRetry: rateLimitRetry + 1 });
             }
 
             // Handle other non-200 errors
@@ -595,7 +599,7 @@ Stok (salah satu):
 
 PENTING: Sertakan "id" seller untuk akurasi!`;
 
-const callGPTAPI = async (userMessage) => {
+const callGPTAPI = async (userMessage, rateLimitRetry = 0) => {
     STATE.stats.aiCalls++;
 
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -616,14 +620,17 @@ const callGPTAPI = async (userMessage) => {
         })
     });
 
-    // Handle rate limit (429) - sleep 15 seconds
+    // Handle rate limit (429) with exponential backoff
     if (res.status === 429) {
-        log(`🚨 GPT API rate limit detected (429)`, 'error');
-        log(`⏸️  Sleeping for ${CONFIG.RATE_LIMIT_SLEEP_DURATION / 1000} seconds...`, 'warning');
-        await wait(CONFIG.RATE_LIMIT_SLEEP_DURATION);
+        if (rateLimitRetry >= CONFIG.MAX_RATE_LIMIT_RETRIES) {
+            throw new Error(`GPT API rate limit exceeded after ${rateLimitRetry} retries. Please check your OpenAI quota at https://platform.openai.com/usage`);
+        }
+        const sleepDuration = CONFIG.RATE_LIMIT_SLEEP_DURATION * Math.pow(2, rateLimitRetry);
+        log(`🚨 GPT API rate limit detected (429) - retry ${rateLimitRetry + 1}/${CONFIG.MAX_RATE_LIMIT_RETRIES}`, 'error');
+        log(`⏸️  Sleeping for ${sleepDuration / 1000} seconds (exponential backoff)...`, 'warning');
+        await wait(sleepDuration);
         log(`✅ Rate limit sleep completed, retrying...`, 'success');
-        // Retry once after sleep
-        return await callGPTAPI(userMessage);
+        return await callGPTAPI(userMessage, rateLimitRetry + 1);
     }
 
     if (!res.ok) {
@@ -962,7 +969,7 @@ Mobile Legends Diamond (semua pakai prefix MLDM):
 
 HANYA balas dengan JSON di atas, tidak ada teks lain.`;
 
-const callGPTCodeAPI = async (userMessage, systemPrompt, modelName) => {
+const callGPTCodeAPI = async (userMessage, systemPrompt, modelName, rateLimitRetry = 0) => {
     if (!CONFIG.GPT_API_KEY) {
         throw new Error('GPT_API_KEY not set');
     }
@@ -985,13 +992,17 @@ const callGPTCodeAPI = async (userMessage, systemPrompt, modelName) => {
         })
     });
 
-    // Handle rate limit (429)
+    // Handle rate limit (429) with exponential backoff
     if (res.status === 429) {
-        log(`🚨 GPT Code API rate limit detected (429)`, 'error');
-        log(`⏸️  Sleeping for ${CONFIG.RATE_LIMIT_SLEEP_DURATION / 1000} seconds...`, 'warning');
-        await wait(CONFIG.RATE_LIMIT_SLEEP_DURATION);
+        if (rateLimitRetry >= CONFIG.MAX_RATE_LIMIT_RETRIES) {
+            throw new Error(`GPT Code API rate limit exceeded after ${rateLimitRetry} retries. Please check your OpenAI quota at https://platform.openai.com/usage`);
+        }
+        const sleepDuration = CONFIG.RATE_LIMIT_SLEEP_DURATION * Math.pow(2, rateLimitRetry);
+        log(`🚨 GPT Code API rate limit detected (429) - retry ${rateLimitRetry + 1}/${CONFIG.MAX_RATE_LIMIT_RETRIES}`, 'error');
+        log(`⏸️  Sleeping for ${sleepDuration / 1000} seconds (exponential backoff)...`, 'warning');
+        await wait(sleepDuration);
         log(`✅ Rate limit sleep completed, retrying...`, 'success');
-        return await callGPTCodeAPI(userMessage, systemPrompt, modelName);
+        return await callGPTCodeAPI(userMessage, systemPrompt, modelName, rateLimitRetry + 1);
     }
 
     if (!res.ok) {

@@ -107,6 +107,7 @@ export const CONFIG = {
     // RATE LIMIT
     // =============================================================================
     RATE_LIMIT_SLEEP_DURATION: parseNum(process.env.RATE_LIMIT_SLEEP_DURATION, 15000),
+    MAX_RATE_LIMIT_RETRIES: parseNum(process.env.MAX_RATE_LIMIT_RETRIES, 5),
 };
 
 // Validate required config
