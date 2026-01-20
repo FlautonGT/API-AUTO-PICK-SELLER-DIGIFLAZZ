@@ -151,11 +151,7 @@ const STATE = {
     skipped: [],
     generatedCodes: new Set(),
     usedSellers: new Map(),
-    // Pattern registry: tracks code patterns by category+brand+type for consistency
-    // Key format: "categoryName|brandName|typeName" -> { prefix: "TSELP", examples: ["TSELP5", "TSELP10"] }
-    codePatterns: new Map(),
-    // All existing codes from database (for checking duplicates across categories)
-    existingCodes: new Set(),
+    // Pattern registry removed - using Telegram for codes
 };
 
 const resetState = () => {
@@ -171,8 +167,7 @@ const resetState = () => {
     STATE.skipped = [];
     STATE.generatedCodes.clear();
     STATE.usedSellers.clear();
-    STATE.codePatterns.clear();
-    STATE.existingCodes.clear();
+    // code pattern registry cleared (removed)
 };
 
 // =============================================================================
@@ -810,6 +805,58 @@ ${JSON.stringify(sellerData)}`;
 // PRODUCT CODE VIA TELEGRAM
 // =============================================================================
 
+// =============================================================================
+// TELEGRAM SELLER & CODE CONFIRMATION
+// =============================================================================
+
+const confirmSellersAndGetCode = async (selectedSellers, productName, brandName, categoryName, typeName, skuCount) => {
+    if (!telegramBot) {
+        throw new Error('Telegram bot not configured');
+    }
+
+    // Get AI reasoning from last AI call
+    const aiReasoning = selectedSellers.length > 0 ? 
+        `Dipilih berdasarkan: harga optimal, rating, dan availability` : 
+        'No reasoning available';
+
+    // Step 1: Confirm sellers
+    log(`  📱 Sending seller confirmation to Telegram...`, 'info');
+    const sellerResult = await telegramBot.requestSellerConfirmation({
+        category: categoryName,
+        brand: brandName,
+        type: typeName,
+        product: productName,
+        skuCount
+    }, selectedSellers, aiReasoning);
+
+    // Step 2: Handle seller change if needed
+    if (sellerResult.action === 'change') {
+        log(`  🔄 Owner requested seller change: ${sellerResult.changeType}`, 'info');
+        // Return signal to re-select sellers
+        return { needsReselect: true, changeType: sellerResult.changeType };
+    }
+
+    // Step 3: Request product code
+    log(`  📱 Requesting product code from Telegram...`, 'info');
+    const code = await telegramBot.requestProductCode({
+        category: categoryName,
+        brand: brandName,
+        type: typeName,
+        product: productName,
+        skuCount
+    });
+
+    log(`  ✅ Received code: ${code}`, 'success');
+    
+    // Track codes
+    STATE.generatedCodes.add(code);
+    STATE.generatedCodes.add(code + CONFIG.BACKUP1_SUFFIX);
+    STATE.generatedCodes.add(code + CONFIG.BACKUP2_SUFFIX);
+
+    return { needsReselect: false, code, sellers: sellerResult.sellers };
+};
+
+
 const requestProductCodeViaTelegram = async (productName, brandName, categoryName, typeName, skuCount) => {
     if (!telegramBot) {
         throw new Error('Telegram bot not configured');
@@ -852,128 +899,7 @@ const getBaseCode = (code) => {
     }
     return base;
 };
-
-/**
- * Extract prefix pattern from a product code
- * E.g., "TSELP5" -> "TSELP", "TSELD1G" -> "TSELD", "ML86DM" -> "ML"
- * The prefix is the alphabetic part before any numbers
- */
-const extractCodePrefix = (code) => {
-    if (!code || typeof code !== 'string') return '';
-    const baseCode = getBaseCode(code);
-    // Extract alphabetic prefix (everything before the first digit)
-    const match = baseCode.match(/^([A-Z]+)/i);
-    return match ? match[1].toUpperCase() : '';
-};
-
-/**
- * Generate pattern key for category+brand+type combination
- */
-const getPatternKey = (categoryName, brandName, typeName) => {
-    return `${(categoryName || '').toLowerCase()}|${(brandName || '').toLowerCase()}|${(typeName || '').toLowerCase()}`;
-};
-
-/**
- * Register a code pattern for a specific category+brand+type combination
- */
-const registerCodePattern = (categoryName, brandName, typeName, code) => {
-    if (!code || typeof code !== 'string') return;
-
-    const baseCode = getBaseCode(code);
-    if (!baseCode) return;
-
-    const prefix = extractCodePrefix(baseCode);
-    if (!prefix || prefix.length < 2) return;
-
-    const key = getPatternKey(categoryName, brandName, typeName);
-
-    // Add to existing codes set (for duplicate checking across all categories)
-    STATE.existingCodes.add(baseCode);
-    STATE.existingCodes.add(baseCode + CONFIG.BACKUP1_SUFFIX);
-    STATE.existingCodes.add(baseCode + CONFIG.BACKUP2_SUFFIX);
-
-    if (!STATE.codePatterns.has(key)) {
-        STATE.codePatterns.set(key, {
-            prefix: prefix,
-            examples: [baseCode],
-            categoryName,
-            brandName,
-            typeName
-        });
-    } else {
-        const pattern = STATE.codePatterns.get(key);
-        // Only add to examples if not already there (limit to 5 examples)
-        if (!pattern.examples.includes(baseCode) && pattern.examples.length < 5) {
-            pattern.examples.push(baseCode);
-        }
-        // If new prefix is more common, update it
-        // (Keep the prefix from the first code as the standard)
-    }
-};
-
-/**
- * Pre-scan all products to build the code pattern registry
- */
-const buildCodePatternRegistry = async () => {
-    log('📊 Pre-scanning products to build code pattern registry...', 'info');
-
-    // Build lookup maps from STATE (IDs -> names)
-    const brandMap = new Map(STATE.brands.map(b => [b.id, b.name]));
-    const categoryMap = new Map(STATE.categories.map(c => [c.id, c.name]));
-    const typeMap = new Map(STATE.types.map(t => [t.id, t.name]));
-
-    let totalProducts = 0;
-    let totalPatterns = 0;
-
-    for (const category of STATE.categories) {
-        // Skip filtered categories
-        if (CONFIG.SKIP_CATEGORIES.some(skip =>
-            category.name.toLowerCase().includes(skip.toLowerCase())
-        )) {
-            continue;
-        }
-
-        try {
-            const products = await retry(() => api.getProductsByCategory(category.id));
-
-            for (const product of products) {
-                if (product.code && product.code.trim() !== '') {
-                    // Resolve IDs to names using lookup maps
-                    const categoryId = product.product_details?.category?.id;
-                    const brandId = product.product_details?.brand?.id;
-                    const typeId = product.product_details?.type?.id;
-
-                    const categoryName = categoryMap.get(categoryId) || category.name;
-                    const brandName = brandMap.get(brandId) || '';
-                    const typeName = typeMap.get(typeId) || '';
-
-                    registerCodePattern(categoryName, brandName, typeName, product.code);
-                    totalProducts++;
-                }
-            }
-        } catch (e) {
-            log(`⚠️ Failed to scan category ${category.name}: ${e.message}`, 'warning');
-        }
-
-        // Small delay to avoid rate limiting
-        await wait(100);
-    }
-
-    totalPatterns = STATE.codePatterns.size;
-    log(`✅ Code pattern registry built: ${totalPatterns} patterns from ${totalProducts} products`, 'success');
-    log(`   Existing codes tracked: ${STATE.existingCodes.size}`, 'info');
-
-    // Log some example patterns
-    if (CONFIG.LOG_TO_CONSOLE && totalPatterns > 0) {
-        log('   Sample patterns:', 'info');
-        let count = 0;
-        for (const [key, pattern] of STATE.codePatterns) {
-            if (count >= 5) break;
-            log(`     ${pattern.brandName} ${pattern.typeName}: ${pattern.prefix} (e.g., ${pattern.examples.slice(0, 3).join(', ')})`, 'info');
-            count++;
-        }
-    }
-};
+// Code pattern registry removed - product codes handled via Telegram
 
 /**
  * Check if product row has valid seller
@@ -1595,34 +1521,56 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                     log(`  ⚠️ Excluding ${excludeIds.length} existing seller(s) from AI selection to avoid duplicates`, 'info');
                 }
                 
-                selectedSellers = await getAISellers(candidates, productName, usedList, excludeIds, neededSellers);
-                
-                // Double-check: if any selected seller matches existing sellers, request AI again with exclude
-                if (rowsWithSeller.length > 0 && selectedSellers.length > 0) {
-                    const duplicateSellers = selectedSellers.filter(aiSeller => {
-                        return rowsWithSeller.some(row => row.seller_sku_id === aiSeller.id);
-                    });
+                // Loop: select sellers via AI, then confirm via Telegram. Owner can request reselection.
+                let sellerConfirmResult;
+                let retrySellerSelection = true;
+                let excludeSellerIds = excludeIds.slice();
+
+                while (retrySellerSelection) {
+                    selectedSellers = await getAISellers(candidates, productName, usedList, excludeSellerIds, neededSellers);
                     
-                    if (duplicateSellers.length > 0) {
-                        log(`  ⚠️ AI selected ${duplicateSellers.length} seller(s) that already exist in other rows`, 'warning');
-                        duplicateSellers.forEach(dup => {
-                            const matchingRow = rowsWithSeller.find(row => row.seller_sku_id === dup.id);
-                            log(`     - "${dup.seller || dup.name}" (ID: ${dup.id}) already exists in row ${matchingRow?.id}`, 'warning');
-                        });
+                    // Confirm sellers and get code via Telegram
+                    sellerConfirmResult = await confirmSellersAndGetCode(
+                        selectedSellers,
+                        productName,
+                        brandName,
+                        categoryName,
+                        resolvedTypeName,
+                        rows.length
+                    );
+                    
+                    if (sellerConfirmResult.needsReselect) {
+                        // Owner wants to change sellers
+                        const changeType = sellerConfirmResult.changeType;
                         
-                        // Add duplicate seller IDs to exclude list and request AI again
-                        const newExcludeIds = [...excludeIds, ...duplicateSellers.map(s => s.id)];
-                        log(`  🔄 Requesting AI again with ${newExcludeIds.length} excluded seller(s)...`, 'info');
-                        
-                        try {
-                            selectedSellers = await getAISellers(candidates, productName, usedList, newExcludeIds, neededSellers);
-                            log(`  ✅ AI re-selected ${selectedSellers.length} seller(s) (excluding duplicates)`, 'success');
-                        } catch (retryErr) {
-                            log(`  ⚠️ AI re-selection failed: ${retryErr.message}`, 'warning');
-                            // Continue with original selection (will cause duplicate error, but handled by duplicate error handler)
+                        // Add current sellers to exclude list based on change type
+                        if (changeType === 'main') {
+                            excludeSellerIds.push(selectedSellers.find(s => s.type === 'MAIN')?.id);
+                        } else if (changeType === 'b1') {
+                            excludeSellerIds.push(selectedSellers.find(s => s.type === 'B1')?.id);
+                        } else if (changeType === 'b2') {
+                            excludeSellerIds.push(selectedSellers.find(s => s.type === 'B2')?.id);
+                        } else if (changeType === 'main_b1') {
+                            excludeSellerIds.push(selectedSellers.find(s => s.type === 'MAIN')?.id);
+                            excludeSellerIds.push(selectedSellers.find(s => s.type === 'B1')?.id);
+                        } else if (changeType === 'main_b2') {
+                            excludeSellerIds.push(selectedSellers.find(s => s.type === 'MAIN')?.id);
+                            excludeSellerIds.push(selectedSellers.find(s => s.type === 'B2')?.id);
+                        } else if (changeType === 'b1_b2') {
+                            excludeSellerIds.push(selectedSellers.find(s => s.type === 'B1')?.id);
+                            excludeSellerIds.push(selectedSellers.find(s => s.type === 'B2')?.id);
+                        } else if (changeType === 'all') {
+                            excludeSellerIds = [...excludeSellerIds, ...selectedSellers.map(s => s.id)];
                         }
+                        
+                        log(`  🔄 Re-selecting sellers (excluding ${excludeSellerIds.length} seller(s))...`, 'info');
+                    } else {
+                        retrySellerSelection = false;
                     }
                 }
+
+                // Use sellers returned from Telegram confirmation
+                selectedSellers = sellerConfirmResult.sellers;
 
         if (!STATE.usedSellers.has(usedKey)) STATE.usedSellers.set(usedKey, []);
                 selectedSellers.forEach(s => STATE.usedSellers.get(usedKey).push(s.seller || s.name));
@@ -1720,15 +1668,9 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
 
             log(`     Context: Category=${categoryName}, Brand=${brandName}, Type=${typeName}`, 'info');
 
-            // Request code via Telegram
-            baseCode = await requestProductCodeViaTelegram(
-                productName,
-                brandName,
-                categoryName,
-                typeName,
-                rows.length
-            );
-            log(`     ✅ Received code from Telegram: ${baseCode}`, 'success');
+            // Use code returned from Telegram during seller confirmation
+            baseCode = sellerConfirmResult && sellerConfirmResult.code;
+            log(`     ✅ Using code from Telegram confirmation: ${baseCode}`, 'success');
         } else {
             // Use existing code
             baseCode = rows[0].code;
@@ -2136,13 +2078,18 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                         // Request new code via Telegram
                         try {
                             log(`     📩 Requesting new product code via Telegram...`, 'info');
-                            const newBaseCode = await requestProductCodeViaTelegram(
-                                productName,
-                                brandName,
-                                categoryName,
-                                resolvedTypeName,
-                                rows.length
-                            );
+                            const newBaseCode = await telegramBot.requestProductCode({
+                                category: categoryName,
+                                brand: brandName,
+                                type: resolvedTypeName,
+                                product: productName,
+                                skuCount: rows.length
+                            });
+
+                            // Track generated codes
+                            STATE.generatedCodes.add(newBaseCode);
+                            STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP1_SUFFIX);
+                            STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP2_SUFFIX);
 
                             log(`     ✅ Received new base code from Telegram: ${newBaseCode}`, 'success');
 
@@ -2597,8 +2544,7 @@ const run = async (categoryFilter = null) => {
 
         log(`Loaded: ${STATE.categories.length} categories, ${STATE.brands.length} brands, ${STATE.types.length} types`, 'info');
 
-        // Pre-scan all products to build code pattern registry for consistency
-        await buildCodePatternRegistry();
+        // Code pattern registry removed (product codes obtained via Telegram)
 
         // MODE=DISTURBANCE: Process closed/error products instead of categories
         if (CONFIG.MODE === 'DISTURBANCE') {

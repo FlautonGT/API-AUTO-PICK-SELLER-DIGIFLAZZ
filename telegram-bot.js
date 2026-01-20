@@ -8,12 +8,11 @@ export class TelegramProductCodeBot {
     constructor(token, chatId) {
         this.bot = new TelegramBot(token, { polling: true });
         this.chatId = chatId;
-        this.pendingRequests = new Map(); // messageId -> { resolve, reject, data }
+        this.pendingRequests = new Map();
         this.setupListeners();
     }
 
     setupListeners() {
-        // Listen for text messages (replies)
         this.bot.on('message', async (msg) => {
             if (msg.chat.id.toString() !== this.chatId.toString()) return;
             if (!msg.reply_to_message) return;
@@ -21,65 +20,133 @@ export class TelegramProductCodeBot {
             const replyToId = msg.reply_to_message.message_id;
             const pending = this.pendingRequests.get(replyToId);
             
-            if (pending) {
+            if (pending && pending.type === 'code') {
                 const code = msg.text.trim().toUpperCase();
-                await this.confirmProductCode(code, msg.message_id, pending.data, pending);
+                await this.confirmProductCode(code, pending);
             }
         });
 
-        // Listen for callback queries (button clicks)
         this.bot.on('callback_query', async (query) => {
-            const [action, code] = query.data.split('_');
-            
             await this.bot.answerCallbackQuery(query.id);
             
-            if (action === 'confirm') {
-                await this.bot.editMessageText(
-                    `✅ Kode produk *${code}* dikonfirmasi!`,
-                    {
-                        chat_id: this.chatId,
-                        message_id: query.message.message_id,
-                        parse_mode: 'Markdown'
-                    }
-                );
-                
-                // Find and resolve pending request
-                for (const [msgId, pending] of this.pendingRequests.entries()) {
-                    if (pending.confirmMessageId === query.message.message_id) {
-                        clearTimeout(pending.timeout);
-                        this.pendingRequests.delete(msgId);
-                        pending.resolve(code);
-                        break;
-                    }
-                }
-            } else if (action === 'reject') {
-                await this.bot.editMessageText(
-                    `❌ Kode produk ditolak. Silakan reply pesan awal dengan kode baru.`,
-                    {
-                        chat_id: this.chatId,
-                        message_id: query.message.message_id
-                    }
-                );
+            const data = query.data;
+            
+            // Handle seller confirmation
+            if (data.startsWith('seller_')) {
+                const action = data.replace('seller_', '');
+                await this.handleSellerAction(action, query.message.message_id);
+            }
+            // Handle code confirmation
+            else if (data.startsWith('code_')) {
+                const [_, action, code] = data.split('_');
+                await this.handleCodeConfirmation(action, code, query.message.message_id);
             }
         });
     }
 
     /**
-     * Request kode produk dari owner via Telegram
+     * Request seller confirmation with product details
      */
-    async requestProductCode(productData) {
-        const { category, brand, type, product, skuCount } = productData;
+    async requestSellerConfirmation(productData, sellers, aiReasoning) {
+        const { category, brand, type, product } = productData;
         
-        const message = `
-🔔 *Konfirmasi Kode Produk*
+        let message = `
+🤖 *Konfirmasi Seller & Produk*
 
 📁 *Kategori:* ${category}
 🏷️ *Brand:* ${brand}
 📋 *Tipe:* ${type || 'Umum'}
 📦 *Produk:* ${product}
-🔢 *Jumlah SKU:* ${skuCount} (${skuCount === 3 ? '1 Main 2 Backup' : skuCount === 2 ? '1 Main 1 Backup' : '1 Main 0 Backup'})
 
-💬 *Reply pesan ini dengan kode produk yang akan digunakan*
+👥 *Daftar Seller:*
+`;
+
+        sellers.forEach((seller, idx) => {
+            const num = idx + 1;
+            message += `
+*${num}. ${seller.type}* - ${seller.seller || seller.name}
+`;
+            message += `   💰 Harga: Rp ${(seller.price || 0).toLocaleString('id-ID')}\n`;
+            message += `   ⭐ Rating: ${seller.reviewAvg || seller.rating || 0}\n`;
+            message += `   📦 Multi: ${seller.multi ? 'Ya' : 'Tidak'}\n`;
+            message += `   🧾 Faktur: ${seller.faktur ? 'Ya' : 'Tidak'}\n`;
+            message += `   📊 Stock: ${seller.unlimited_stock ? 'Unlimited' : 'Limited'}\n`;
+            message += `   ✅ Status: ${seller.status ? 'Aktif' : 'Tidak Aktif'}\n`;
+            message += `   ⏰ Cutoff: ${seller.start_cut_off || '00:00'} - ${seller.end_cut_off || '00:00'}\n`;
+            message += `   📝 Desc: ${(seller.deskripsi || seller.description || '-').substring(0, 80)}...\n`;
+        });
+
+        message += `\n🧠 *AI Reasoning:*\n${aiReasoning || 'Seller dipilih berdasarkan kriteria optimal'}\n`;
+
+        const buttons = [];
+        if (sellers.length >= 1) buttons.push([{ text: '🔄 Ganti Main', callback_data: 'seller_main' }]);
+        if (sellers.length >= 2) buttons.push([{ text: '🔄 Ganti B1', callback_data: 'seller_b1' }]);
+        if (sellers.length >= 3) buttons.push([{ text: '🔄 Ganti B2', callback_data: 'seller_b2' }]);
+        if (sellers.length >= 2) buttons.push([{ text: '🔄 Ganti Main & B1', callback_data: 'seller_main_b1' }]);
+        if (sellers.length >= 3) buttons.push([{ text: '🔄 Ganti Main & B2', callback_data: 'seller_main_b2' }]);
+        if (sellers.length >= 3) buttons.push([{ text: '🔄 Ganti B1 & B2', callback_data: 'seller_b1_b2' }]);
+        buttons.push([{ text: '🔄 Ganti Semua', callback_data: 'seller_all' }]);
+        buttons.push([{ text: '✅ Lanjutkan', callback_data: 'seller_continue' }]);
+
+        try {
+            const sent = await this.bot.sendMessage(this.chatId, message, {
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: buttons }
+            });
+
+            return new Promise((resolve) => {
+                this.pendingRequests.set(sent.message_id, {
+                    resolve,
+                    type: 'seller',
+                    data: productData,
+                    sellers,
+                    aiReasoning
+                });
+            });
+        } catch (error) {
+            throw new Error(`Failed to send seller confirmation: ${error.message}`);
+        }
+    }
+
+    async handleSellerAction(action, messageId) {
+        const pending = this.pendingRequests.get(messageId);
+        if (!pending) return;
+
+        if (action === 'continue') {
+            await this.bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+                chat_id: this.chatId,
+                message_id: messageId
+            });
+            
+            this.pendingRequests.delete(messageId);
+            pending.resolve({ action: 'continue', sellers: pending.sellers });
+        } else {
+            await this.bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+                chat_id: this.chatId,
+                message_id: messageId
+            });
+            
+            this.pendingRequests.delete(messageId);
+            pending.resolve({ action: 'change', changeType: action, sellers: pending.sellers });
+        }
+    }
+
+    /**
+     * Request product code from owner
+     */
+    async requestProductCode(productData) {
+        const { category, brand, type, product, skuCount } = productData;
+        
+        const message = `
+📝 *Silakan Tuliskan Kode Produk*
+
+📁 *Kategori:* ${category}
+🏷️ *Brand:* ${brand}
+📋 *Tipe:* ${type || 'Umum'}
+📦 *Produk:* ${product}
+🔢 *Jumlah SKU:* ${skuCount}
+
+💬 *Reply pesan ini dengan kode produk*
 `;
 
         try {
@@ -87,35 +154,31 @@ export class TelegramProductCodeBot {
                 parse_mode: 'Markdown'
             });
 
-            // Wait for owner reply
-            return new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                    this.pendingRequests.delete(sent.message_id);
-                    reject(new Error('Timeout waiting for product code (5 minutes)'));
-                }, 300000); // 5 minutes timeout
-
+            return new Promise((resolve) => {
                 this.pendingRequests.set(sent.message_id, {
                     resolve,
-                    reject,
-                    data: productData,
-                    timeout
+                    type: 'code',
+                    data: productData
                 });
             });
         } catch (error) {
-            throw new Error(`Failed to send Telegram message: ${error.message}`);
+            throw new Error(`Failed to send code request: ${error.message}`);
         }
     }
 
-    /**
-     * Konfirmasi kode produk dengan inline keyboard
-     */
-    async confirmProductCode(code, replyMessageId, productData, pending) {
+    async confirmProductCode(code, pending) {
+        const { category, brand, type, product } = pending.data;
+        
         const message = `
-✅ *Kode Produk Diterima*
+✅ *Konfirmasi Kode Produk*
 
-Kode produk yang ditentukan adalah: *${code}*
+📁 *Kategori:* ${category}
+🏷️ *Brand:* ${brand}
+📋 *Tipe:* ${type || 'Umum'}
+📦 *Produk:* ${product}
+🔑 *Kode:* *${code}*
 
-Apakah sudah benar dan sesuai?
+Apakah sudah benar?
 `;
 
         try {
@@ -124,17 +187,48 @@ Apakah sudah benar dan sesuai?
                 reply_markup: {
                     inline_keyboard: [
                         [
-                            { text: '✅ Ya', callback_data: `confirm_${code}` },
-                            { text: '❌ Tidak', callback_data: `reject_${code}` }
+                            { text: '✅ Ya', callback_data: `code_yes_${code}` },
+                            { text: '❌ Tidak', callback_data: `code_no_${code}` }
                         ]
                     ]
                 }
             });
 
-            // Store confirm message ID for callback handling
             pending.confirmMessageId = sent.message_id;
         } catch (error) {
-            throw new Error(`Failed to confirm product code: ${error.message}`);
+            throw new Error(`Failed to confirm code: ${error.message}`);
+        }
+    }
+
+    async handleCodeConfirmation(action, code, messageId) {
+        const pending = Array.from(this.pendingRequests.values()).find(p => p.confirmMessageId === messageId);
+        if (!pending) return;
+
+        if (action === 'yes') {
+            await this.bot.editMessageText(
+                `✅ Kode produk *${code}* dikonfirmasi!`,
+                {
+                    chat_id: this.chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown'
+                }
+            );
+            
+            for (const [msgId, p] of this.pendingRequests.entries()) {
+                if (p.confirmMessageId === messageId) {
+                    this.pendingRequests.delete(msgId);
+                    p.resolve(code);
+                    break;
+                }
+            }
+        } else {
+            await this.bot.editMessageText(
+                `❌ Kode ditolak. Reply pesan awal dengan kode baru.`,
+                {
+                    chat_id: this.chatId,
+                    message_id: messageId
+                }
+            );
         }
     }
 
