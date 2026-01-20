@@ -27,9 +27,16 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { CONFIG, validateConfig, printConfig } from './config.js';
+import { TelegramProductCodeBot } from './telegram-bot.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Initialize Telegram Bot
+let telegramBot = null;
+if (CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
+    telegramBot = new TelegramProductCodeBot(CONFIG.TELEGRAM_BOT_TOKEN, CONFIG.TELEGRAM_CHAT_ID);
+}
 
 // =============================================================================
 // LOGGER
@@ -204,6 +211,12 @@ const api = {
                 const sleepDuration = CONFIG.RATE_LIMIT_SLEEP_DURATION * Math.pow(2, rateLimitRetry);
                 log(`🚨 Rate limit detected (429) on ${endpoint} - retry ${rateLimitRetry + 1}/${CONFIG.MAX_RATE_LIMIT_RETRIES}`, 'error');
                 log(`⏸️  Sleeping for ${sleepDuration / 1000} seconds (exponential backoff)...`, 'warning');
+                
+                // Send Telegram notification
+                if (telegramBot) {
+                    await telegramBot.sendRateLimitNotification('Digiflazz API', rateLimitRetry + 1, sleepDuration);
+                }
+                
                 await wait(sleepDuration);
                 log(`✅ Rate limit sleep completed, retrying...`, 'success');
                 return await this.request(endpoint, { ...options, _rateLimitRetry: rateLimitRetry + 1 });
@@ -213,6 +226,11 @@ const api = {
             if (!res.ok) {
                 const text = await res.text();
                 const errorMsg = `HTTP ${res.status}: ${text.substring(0, 200)}`;
+                
+                // Send 401 notification to Telegram
+                if (res.status === 401 && telegramBot) {
+                    await telegramBot.send401Notification();
+                }
                 
                 // Log request body for debugging (especially for 400 errors)
                 let requestBody = null;
@@ -628,6 +646,12 @@ const callGPTAPI = async (userMessage, rateLimitRetry = 0) => {
         const sleepDuration = CONFIG.RATE_LIMIT_SLEEP_DURATION * Math.pow(2, rateLimitRetry);
         log(`🚨 GPT API rate limit detected (429) - retry ${rateLimitRetry + 1}/${CONFIG.MAX_RATE_LIMIT_RETRIES}`, 'error');
         log(`⏸️  Sleeping for ${sleepDuration / 1000} seconds (exponential backoff)...`, 'warning');
+
+        // Send Telegram notification for rate limit
+        if (telegramBot) {
+            await telegramBot.sendRateLimitNotification('GPT API', rateLimitRetry + 1, sleepDuration);
+        }
+
         await wait(sleepDuration);
         log(`✅ Rate limit sleep completed, retrying...`, 'success');
         return await callGPTAPI(userMessage, rateLimitRetry + 1);
@@ -783,388 +807,32 @@ ${JSON.stringify(sellerData)}`;
 };
 
 // =============================================================================
-// PRODUCT CODE GENERATOR
+// PRODUCT CODE VIA TELEGRAM
 // =============================================================================
 
-const BRAND_CODES = {
-    'telkomsel': 'TSEL', 'tsel': 'TSEL', 'indosat': 'ISAT', 'im3': 'ISAT',
-    'xl': 'XL', 'axis': 'AXIS', 'tri': 'TRI', 'three': 'TRI',
-    'smartfren': 'SMFR', 'by.u': 'BYU', 'byu': 'BYU',
-    'mobile legend': 'ML', 'mobile legends': 'ML', 'mlbb': 'ML',
-    'free fire': 'FF', 'freefire': 'FF', 'garena': 'FF',
-    'pubg': 'PUBG', 'valorant': 'VALO', 'genshin': 'GI', 'honkai': 'HSR',
-    'pln': 'PLN', 'token listrik': 'PLN',
-    'gopay': 'GPAY', 'ovo': 'OVO', 'dana': 'DANA',
-    'shopeepay': 'SPAY', 'shopee pay': 'SPAY', 'linkaja': 'LINK',
-    'google play': 'GP', 'steam': 'STEAM', 'spotify': 'SPOT',
-    'netflix': 'NFLX', 'vidio': 'VID', 'viu': 'VIU',
-};
-
-const generateProductCode = (productName, brandName = '') => {
-    const nameLower = productName.toLowerCase();
-    const brandLower = brandName.toLowerCase();
-
-    let brand = '';
-    for (const [key, code] of Object.entries(BRAND_CODES)) {
-        if (nameLower.includes(key) || brandLower.includes(key)) {
-            brand = code;
-            break;
-        }
-    }
-    if (!brand) {
-        // Use first word, max 4 chars (same as old_file.js)
-        const firstWord = productName.split(' ')[0].replace(/[^a-zA-Z]/g, '');
-        brand = firstWord.substring(0, 4).toUpperCase() || 'PROD';
+const requestProductCodeViaTelegram = async (productName, brandName, categoryName, typeName, skuCount) => {
+    if (!telegramBot) {
+        throw new Error('Telegram bot not configured');
     }
 
-    // Extract nominal - find numbers (same logic as old_file.js)
-    const numbers = productName.match(/[\d.,]+/g);
-    let nominal = '';
-    if (numbers && numbers.length > 0) {
-        // Get the number, remove dots/commas
-        let numStr = numbers[0].replace(/[.,]/g, '');
-        let num = parseInt(numStr);
+    log(`  📩 Requesting product code via Telegram...`, 'info');
 
-        // Convert to K if >= 1000 (same as old_file.js)
-        if (num >= 1000) {
-            nominal = String(Math.floor(num / 1000));
-        } else {
-            nominal = String(num);
-        }
-    }
+    const code = await telegramBot.requestProductCode({
+        category: categoryName,
+        brand: brandName,
+        type: typeName || 'Umum',
+        product: productName,
+        skuCount: skuCount
+    });
 
-    // Use max length from config, but default to 10 if not set (same as old_file.js)
-    const maxLength = CONFIG.CODE_MAX_LENGTH || 10;
-    
-    // Add variation to make codes more unique
-    const variations = [
-        '', // Standard: brand + nominal
-        'PUL', // Add PUL for pulsa
-        'K', // Add K for thousands
-        'RB', // Add RB for ribu
-    ];
-    
-    // Randomly select a variation (or use timestamp-based for more randomness)
-    const variationIndex = Math.floor(Math.random() * variations.length);
-    const variation = variations[variationIndex];
-    
-    // Build base code with variation
-    let baseCode = (brand + variation + nominal).substring(0, maxLength);
-    
-    // If still too long, try without variation
-    if (baseCode.length > maxLength) {
-        baseCode = (brand + nominal).substring(0, maxLength);
-    }
-    
-    let code = baseCode;
-    let suffix = 1;
+    log(`  ✅ Received code from Telegram: ${code}`, 'success');
 
-    while (STATE.generatedCodes.has(code)) {
-        // Try different variations if code is taken
-        if (suffix <= variations.length) {
-            const altVariation = variations[(variationIndex + suffix) % variations.length];
-            code = (brand + altVariation + nominal).substring(0, maxLength);
-            if (code.length > maxLength) {
-                code = (brand + nominal).substring(0, maxLength);
-            }
-        } else {
-            code = baseCode + suffix++;
-        }
-        
-        if (suffix > 99) {
-            // Use timestamp + random for maximum uniqueness
-            const randomSuffix = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-            code = baseCode.substring(0, Math.max(1, maxLength - 3)) + randomSuffix;
-            break;
-        }
-    }
-
+    // Track generated codes
     STATE.generatedCodes.add(code);
     STATE.generatedCodes.add(code + CONFIG.BACKUP1_SUFFIX);
     STATE.generatedCodes.add(code + CONFIG.BACKUP2_SUFFIX);
 
-    return code || 'PROD';
-};
-
-// =============================================================================
-// AI PRODUCT CODE GENERATION (GPT)
-// =============================================================================
-
-const SYSTEM_PROMPT_PRODUCT_CODE = `Kamu asisten generator kode produk PPOB. HANYA BALAS DENGAN JSON.
-
-TUGAS: Generate kode produk singkat berdasarkan KATEGORI, BRAND KATEGORI, BRAND, dan NAMA PRODUK.
-
-=== ATURAN PALING PENTING: KONSISTENSI ===
-WAJIB IKUTI PATTERN YANG SUDAH ADA jika diberikan!
-- Jika ada "EXISTING_PATTERN" di input, WAJIB gunakan PREFIX yang sama
-- Contoh: Jika pattern TSELP sudah ada untuk Telkomsel Pulsa, maka:
-  * Telkomsel 5000 → TSELP5 (BUKAN TSELPUL5 atau TSEL5)
-  * Telkomsel 10000 → TSELP10 (BUKAN TSEL10K atau ISATP10)
-- Konsistensi lebih penting dari kreativitas!
-
-=== ATURAN DASAR ===
-- Maksimal 25 karakter (STRICT - tidak boleh lebih)
-- Hanya HURUF KAPITAL dan ANGKA (tanpa simbol, spasi, atau underscore)
-- Format: [BRAND][KATEGORI_SUFFIX][NOMINAL/UNIT]
-- Kode harus UNIK dan MUDAH DIBACA
-- IKUTI pattern yang sudah ada untuk kategori+brand+type yang sama
-
-=== SINGKATAN BRAND (2-4 huruf) ===
-- TELKOMSEL → TSEL
-- INDOSAT → ISAT
-- XL → XL
-- AXIS → AXIS
-- TRI/THREE → TRI
-- SMARTFREN → SMFR
-- GOOGLE PLAY → GP
-- FREE FIRE → FF
-- MOBILE LEGENDS → ML (KONSISTEN, jangan pakai MLBB/MLD/MLG yang berbeda-beda)
-- PUBG → PUBG
-- PLN → PLN
-- NETFLIX → NFLX
-- VIDIO → VID
-- VIU → VIU
-- (Brand lain → ambil 2-4 huruf pertama yang mudah dikenali sesuai nama brand mereka)
-
-=== SUFFIX KATEGORI (KONSISTEN per brand+type) ===
-- Pulsa → P (contoh: TSELP5, TSELP10, TSELP25 - semua pakai TSELP)
-- Data → D (contoh: TSELD1, TSELD5, TSELD10 - semua pakai TSELD)
-- Voucher → V (contoh: GPV10, GPV50, GPV100 - semua pakai GPV)
-- Game Diamond → DM (contoh: MLDM86, MLDM172 - semua pakai MLDM)
-- Game UC → UC (contoh: PUBGUC60, PUBGUC325)
-- E-Money → EM atau langsung nominal
-
-=== SUFFIX BRAND KATEGORI (jika bukan "Umum" atau "-") ===
-- UnlimitedMax → UM
-- Orbit → OB
-- Freedom → FM
-- Conference → CF
-- Flash → FL
-- Combo → CB
-
-=== FORMAT NOMINAL ===
-- Ribuan: 5000 → 5, 10000 → 10, 25000 → 25, 100000 → 100
-- Data: 1GB → 1, 5GB → 5, 10GB → 10
-- Diamond/UC: langsung angka (86, 172, 257, dll)
-
-=== CONTOH KONSISTENSI ===
-Telkomsel Pulsa (semua pakai prefix TSELP):
-- Telkomsel 5000 → TSELP5
-- Telkomsel 10000 → TSELP10
-- Telkomsel 25000 → TSELP25
-
-Telkomsel Data Umum (semua pakai prefix TSELDU):
-- Telkomsel Data 1GB → TSELDU1
-- Telkomsel Data 5GB → TSELDU5
-- Telkomsel Data 10GB → TSELDU10
-
-Mobile Legends Diamond (semua pakai prefix MLDM):
-- ML 86 Diamond → MLDM86
-- ML 172 Diamond → MLDM172
-- ML 257 Diamond → MLDM257
-
-=== FORMAT RESPONSE ===
-
-{"code":"TSELP5","reasoning":"Telkomsel Pulsa 5rb, mengikuti pattern TSELP"}
-
-HANYA balas dengan JSON di atas, tidak ada teks lain.`;
-
-const callGPTCodeAPI = async (userMessage, systemPrompt, modelName, rateLimitRetry = 0) => {
-    if (!CONFIG.GPT_API_KEY) {
-        throw new Error('GPT_API_KEY not set');
-    }
-
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${CONFIG.GPT_API_KEY}`
-        },
-        body: JSON.stringify({
-            model: modelName || CONFIG.GPT_MODEL_CODE,
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userMessage }
-            ],
-            temperature: 0.7,
-            max_tokens: 1000,
-            response_format: { type: "json_object" }
-        })
-    });
-
-    // Handle rate limit (429) with exponential backoff
-    if (res.status === 429) {
-        if (rateLimitRetry >= CONFIG.MAX_RATE_LIMIT_RETRIES) {
-            throw new Error(`GPT Code API rate limit exceeded after ${rateLimitRetry} retries. Please check your OpenAI quota at https://platform.openai.com/usage`);
-        }
-        const sleepDuration = CONFIG.RATE_LIMIT_SLEEP_DURATION * Math.pow(2, rateLimitRetry);
-        log(`🚨 GPT Code API rate limit detected (429) - retry ${rateLimitRetry + 1}/${CONFIG.MAX_RATE_LIMIT_RETRIES}`, 'error');
-        log(`⏸️  Sleeping for ${sleepDuration / 1000} seconds (exponential backoff)...`, 'warning');
-        await wait(sleepDuration);
-        log(`✅ Rate limit sleep completed, retrying...`, 'success');
-        return await callGPTCodeAPI(userMessage, systemPrompt, modelName, rateLimitRetry + 1);
-    }
-
-    if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`GPT Code API ${res.status}: ${err.substring(0, 100)}`);
-    }
-
-    const data = await res.json();
-    const content = data.choices[0]?.message?.content;
-
-    if (!content) throw new Error('GPT returned empty response');
-    return JSON.parse(content);
-};
-
-const sanitizeCode = (code) => {
-    if (!code) return '';
-    return code.replace(/[^A-Z0-9]/gi, '').toUpperCase().substring(0, 25);
-};
-
-const generateProductCodeAI = async (productName, brandName = '', categoryName = '', brandCategoryName = '', typeName = '', usedCodes = [], retryCount = 0) => {
-    if (!CONFIG.GPT_API_KEY || !CONFIG.GPT_MODEL_CODE) {
-        log('⚠️ GPT_API_KEY or GPT_MODEL_CODE not set, using script-based generation', 'warning');
-        return generateProductCode(productName, brandName);
-    }
-
-    const MAX_RETRIES = 3;
-
-    try {
-        // Look up existing pattern for this category+brand+type combination
-        const existingPattern = getExistingPattern(categoryName, brandName, typeName);
-
-        // Build comprehensive user message with all context
-        let userMessage = `Product Name: ${productName}`;
-        if (brandName) userMessage += `\nBrand: ${brandName}`;
-        if (categoryName) userMessage += `\nKategori: ${categoryName}`;
-        if (typeName) userMessage += `\nType: ${typeName}`;
-        if (brandCategoryName && brandCategoryName !== '-' && brandCategoryName !== 'Umum') {
-            userMessage += `\nBrand Kategori: ${brandCategoryName}`;
-        }
-
-        // Add existing pattern information - THIS IS CRITICAL FOR CONSISTENCY
-        if (existingPattern) {
-            userMessage += `\n\n=== EXISTING_PATTERN (WAJIB IKUTI!) ===`;
-            userMessage += `\nPrefix yang sudah dipakai untuk ${brandName} ${typeName}: ${existingPattern.prefix}`;
-            userMessage += `\nContoh kode yang sudah ada: ${existingPattern.examples.join(', ')}`;
-            userMessage += `\nWAJIB gunakan prefix "${existingPattern.prefix}" untuk konsistensi!`;
-            userMessage += `\nHanya ganti bagian nominalnya saja, prefix HARUS SAMA!`;
-            log(`     📋 Using existing pattern: ${existingPattern.prefix} (examples: ${existingPattern.examples.slice(0, 3).join(', ')})`, 'info');
-        }
-
-        // Add info about used codes if this is a retry
-        if (usedCodes.length > 0) {
-            userMessage += `\n\nKODE YANG SUDAH DIPAKAI (JANGAN PAKAI INI): ${usedCodes.join(', ')}`;
-            userMessage += `\nGenerate kode BARU dengan nominal berbeda, tapi prefix HARUS TETAP SAMA!`;
-        }
-
-        const logMsg = retryCount > 0
-            ? `🤖 Asking AI for product code (retry ${retryCount})...`
-            : `🤖 Asking AI for product code...`;
-        log(logMsg, 'ai');
-
-        const response = await callGPTCodeAPI(userMessage, SYSTEM_PROMPT_PRODUCT_CODE, CONFIG.GPT_MODEL_CODE);
-        const result = typeof response === 'string' ? JSON.parse(response) : response;
-
-        if (!result.code) {
-            throw new Error('AI did not return a code');
-        }
-
-        const code = sanitizeCode(result.code);
-
-        // Validate code is not empty
-        if (!code || code.length === 0) {
-            throw new Error('AI returned empty code');
-        }
-
-        // Check if this code is already taken (including in existing database)
-        let codeIsTaken = isCodeTaken(code);
-
-        if (codeIsTaken && retryCount < MAX_RETRIES) {
-            log(`⚠️ Code ${code} already taken, retrying...`, 'warning');
-            const allUsedCodes = [...usedCodes, code];
-            return await generateProductCodeAI(productName, brandName, categoryName, brandCategoryName, typeName, allUsedCodes, retryCount + 1);
-        }
-
-        // If still duplicate after max retries, use script-based fallback with pattern
-        if (codeIsTaken && retryCount >= MAX_RETRIES) {
-            log(`⚠️ AI retry limit reached, using fallback`, 'warning');
-            return generateProductCodeWithPattern(productName, brandName, existingPattern);
-        }
-
-        // Validate that code follows existing pattern if one exists
-        if (existingPattern && code.length >= existingPattern.prefix.length) {
-            const codePrefix = extractCodePrefix(code);
-            if (codePrefix !== existingPattern.prefix) {
-                log(`⚠️ AI generated ${code} but expected prefix ${existingPattern.prefix}, retrying...`, 'warning');
-                const allUsedCodes = [...usedCodes, code];
-                if (retryCount < MAX_RETRIES) {
-                    return await generateProductCodeAI(productName, brandName, categoryName, brandCategoryName, typeName, allUsedCodes, retryCount + 1);
-                }
-            }
-        }
-
-        log(`🤖 AI Generated: ${code} (${result.reasoning || 'no reasoning'})`, 'ai');
-
-        // Track generated code to prevent duplicates
-        STATE.generatedCodes.add(code);
-        STATE.generatedCodes.add(code + CONFIG.BACKUP1_SUFFIX);
-        STATE.generatedCodes.add(code + CONFIG.BACKUP2_SUFFIX);
-
-        // Register this code pattern for future consistency
-        if (categoryName && brandName && typeName) {
-            registerCodePattern(categoryName, brandName, typeName, code);
-        }
-
-        return code;
-
-    } catch (e) {
-        log(`⚠️ AI code generation failed: ${e.message}, using fallback`, 'warning');
-        const existingPattern = getExistingPattern(categoryName, brandName, typeName);
-        return generateProductCodeWithPattern(productName, brandName, existingPattern);
-    }
-};
-
-/**
- * Generate product code using existing pattern (fallback)
- */
-const generateProductCodeWithPattern = (productName, brandName, existingPattern) => {
-    // Extract nominal from product name
-    const nominalMatch = productName.match(/[\d.,]+/g);
-    let nominal = '';
-    if (nominalMatch && nominalMatch.length > 0) {
-        nominal = nominalMatch[0].replace(/[.,]/g, '');
-        // Convert to K format if >= 1000
-        if (parseInt(nominal) >= 1000) {
-            nominal = String(Math.floor(parseInt(nominal) / 1000));
-        }
-    }
-
-    let baseCode;
-    if (existingPattern && existingPattern.prefix) {
-        // Use existing pattern prefix + nominal
-        baseCode = existingPattern.prefix + nominal;
-    } else {
-        // Fall back to original generateProductCode
-        return generateProductCode(productName, brandName);
-    }
-
-    // Check if code is taken, add suffix if needed
-    let finalCode = baseCode;
-    let suffix = 1;
-    while (isCodeTaken(finalCode) && suffix <= 99) {
-        finalCode = baseCode + String(suffix).padStart(2, '0');
-        suffix++;
-    }
-
-    // Track generated code
-    STATE.generatedCodes.add(finalCode);
-    STATE.generatedCodes.add(finalCode + CONFIG.BACKUP1_SUFFIX);
-    STATE.generatedCodes.add(finalCode + CONFIG.BACKUP2_SUFFIX);
-
-    log(`🔧 Fallback Generated: ${finalCode} (using pattern ${existingPattern?.prefix || 'default'})`, 'info');
-    return finalCode;
+    return code;
 };
 
 // =============================================================================
@@ -1241,29 +909,6 @@ const registerCodePattern = (categoryName, brandName, typeName, code) => {
         // If new prefix is more common, update it
         // (Keep the prefix from the first code as the standard)
     }
-};
-
-/**
- * Get existing pattern for a category+brand+type combination
- * Returns: { prefix: "TSELP", examples: ["TSELP5", "TSELP10"] } or null
- */
-const getExistingPattern = (categoryName, brandName, typeName) => {
-    const key = getPatternKey(categoryName, brandName, typeName);
-    return STATE.codePatterns.get(key) || null;
-};
-
-/**
- * Check if a code is already taken (including in existing database)
- */
-const isCodeTaken = (code) => {
-    if (!code) return false;
-    const baseCode = getBaseCode(code);
-    return STATE.generatedCodes.has(baseCode) ||
-           STATE.generatedCodes.has(baseCode + CONFIG.BACKUP1_SUFFIX) ||
-           STATE.generatedCodes.has(baseCode + CONFIG.BACKUP2_SUFFIX) ||
-           STATE.existingCodes.has(baseCode) ||
-           STATE.existingCodes.has(baseCode + CONFIG.BACKUP1_SUFFIX) ||
-           STATE.existingCodes.has(baseCode + CONFIG.BACKUP2_SUFFIX);
 };
 
 /**
@@ -1543,38 +1188,21 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             
             // Add to STATE.generatedCodes to avoid conflicts
             allExistingCodes.forEach(code => STATE.generatedCodes.add(code));
-            
-            // Get brand category name and type name for AI generation
-            const brandCategoryName = rows[0]?.product_details?.brand_category?.name || 'Umum';
+
+            // Get type name for Telegram request
             const typeName = resolvedTypeName;
 
-            log(`     🤖 Generating new base code (excluding: ${allExistingCodes.join(', ')})...`, 'info');
+            log(`     📩 Requesting new base code via Telegram (excluding: ${allExistingCodes.join(', ')})...`, 'info');
 
-            // Try AI generation first
-            if (CONFIG.GPT_API_KEY && CONFIG.GPT_MODEL_CODE) {
-                try {
-                    newBaseCode = await generateProductCodeAI(
-                        productName,
-                        brandName,
-                        categoryName,
-                        brandCategoryName,
-                        typeName,
-                        allExistingCodes,
-                        0 // retryCount
-                    );
-                    log(`     ✅ AI generated new base code: ${newBaseCode}`, 'success');
-                } catch (aiErr) {
-                    log(`     ⚠️ AI generation failed: ${aiErr.message}, using fallback`, 'warning');
-                    const existingPattern = getExistingPattern(categoryName, brandName, typeName);
-                    newBaseCode = generateProductCodeWithPattern(productName, brandName, existingPattern);
-                    log(`     🔄 Fallback base code: ${newBaseCode}`, 'info');
-                }
-            } else {
-                // Fallback to script-based generation with pattern
-                const existingPattern = getExistingPattern(categoryName, brandName, typeName);
-                newBaseCode = generateProductCodeWithPattern(productName, brandName, existingPattern);
-                log(`     ✅ Generated new base code: ${newBaseCode}`, 'success');
-            }
+            // Request code via Telegram
+            newBaseCode = await requestProductCodeViaTelegram(
+                productName,
+                brandName,
+                categoryName,
+                typeName,
+                rows.length
+            );
+            log(`     ✅ Received new base code: ${newBaseCode}`, 'success');
             
             // Track new codes
             STATE.generatedCodes.add(newBaseCode);
@@ -2087,38 +1715,23 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         }
         
         if (shouldGenerateNew) {
-            // Get brand category name and type name for AI generation
-            const brandCategoryName = rows[0].product_details?.brand_category?.name || 'Umum';
+            // Get type name for Telegram request
             const typeName = resolvedTypeName;
 
-            if (CONFIG.GPT_API_KEY && CONFIG.GPT_MODEL_CODE && CONFIG.SET_PRODUCT_CODE) {
-                // Use AI generation with category and brand category context (only if SET_PRODUCT_CODE is true)
-                log(`     Context: Category=${categoryName}, Brand=${brandName}, Type=${typeName}, BrandCategory=${brandCategoryName}`, 'info');
-                try {
-                    baseCode = await generateProductCodeAI(productName, brandName, categoryName, brandCategoryName, typeName);
-                    log(`     ✅ AI generated code: ${baseCode}`, 'success');
-                } catch (e) {
-                    log(`     ⚠️ AI code generation failed: ${e.message}, using fallback`, 'warning');
-                    const existingPattern = getExistingPattern(categoryName, brandName, typeName);
-                    baseCode = generateProductCodeWithPattern(productName, brandName, existingPattern);
-                    log(`     🔄 Fallback code: ${baseCode}`, 'info');
-                }
-            } else {
-                // Fallback to script-based with pattern
-                if (!CONFIG.SET_PRODUCT_CODE && hasEmptyCode) {
-                    log(`     SET_PRODUCT_CODE is false but code is empty - generating automatically`, 'info');
-                } else {
-                    log(`     Using script-based generation (GPT Code not configured)`, 'info');
-                }
-                const existingPattern = getExistingPattern(categoryName, brandName, typeName);
-                baseCode = generateProductCodeWithPattern(productName, brandName, existingPattern);
-                log(`     ✅ Generated code: ${baseCode}`, 'success');
-            }
+            log(`     Context: Category=${categoryName}, Brand=${brandName}, Type=${typeName}`, 'info');
+
+            // Request code via Telegram
+            baseCode = await requestProductCodeViaTelegram(
+                productName,
+                brandName,
+                categoryName,
+                typeName,
+                rows.length
+            );
+            log(`     ✅ Received code from Telegram: ${baseCode}`, 'success');
         } else {
-            // Use existing code or generate new one (fallback)
-            const typeName = resolvedTypeName;
-            const existingPattern = getExistingPattern(categoryName, brandName, typeName);
-            baseCode = rows[0].code || generateProductCodeWithPattern(productName, brandName, existingPattern);
+            // Use existing code
+            baseCode = rows[0].code;
             log(`     Using existing code: ${baseCode}`, 'info');
         }
         
@@ -2512,53 +2125,35 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                                            errorText.toLowerCase().includes('sudah diambil');
                     
                     if (isCodeTakenError) {
-                        log(`     ⚠️ Code "${finalCode}" already taken - requesting AI to generate new code...`, 'warning');
-                        
+                        log(`     ⚠️ Code "${finalCode}" already taken - requesting new code via Telegram...`, 'warning');
+
                         // Check if there are saved rows (MAIN/B1 already saved)
                         const hasSavedRows = savedRowsMap.size > 0;
                         if (hasSavedRows) {
                             log(`     ⚠️ ${savedRowsMap.size} row(s) already saved - will update ALL rows with new base code for consistency`, 'warning');
                         }
-                        
-                        // Get used codes (including current one and all generated codes)
-                        const usedCodes = Array.from(STATE.generatedCodes);
-                        if (finalCode && !usedCodes.includes(finalCode)) {
-                            usedCodes.push(finalCode);
-                        }
-                        
-                        // Also add codes from saved rows
-                        savedRowsMap.forEach((saved, rowId) => {
-                            if (saved.code && !usedCodes.includes(saved.code)) {
-                                usedCodes.push(saved.code);
-                            }
-                        });
-                        
-                        // Generate new code using AI
-                        try {
-                            const brandCategoryName = row.product_details?.brand_category?.name || 'Umum';
 
-                            log(`     🤖 Asking AI for new product code (excluding: ${usedCodes.join(', ')})...`, 'info');
-                            log(`     📋 Using consistent pattern for ${brandName} ${resolvedTypeName}`, 'info');
-                            const newBaseCode = await generateProductCodeAI(
+                        // Request new code via Telegram
+                        try {
+                            log(`     📩 Requesting new product code via Telegram...`, 'info');
+                            const newBaseCode = await requestProductCodeViaTelegram(
                                 productName,
                                 brandName,
                                 categoryName,
-                                brandCategoryName,
                                 resolvedTypeName,
-                                usedCodes,
-                                1 // retryCount
+                                rows.length
                             );
-                            
-                            log(`     ✅ AI generated new base code: ${newBaseCode}`, 'success');
-                            
+
+                            log(`     ✅ Received new base code from Telegram: ${newBaseCode}`, 'success');
+
                             // If there are saved rows, update them with new base code
                             if (hasSavedRows) {
                                 log(`     🔄 Updating ${savedRowsMap.size} saved row(s) with new base code for consistency...`, 'info');
-                                
+
                                 for (const [savedRowId, savedData] of savedRowsMap.entries()) {
                                     const savedRow = savedData.row;
                                     const savedSellerType = savedData.sellerType;
-                                    
+
                                     // Determine new code for saved row
                                     let newCodeForSaved;
                                     if (savedSellerType === 'MAIN') {
@@ -2570,7 +2165,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                                     } else {
                                         newCodeForSaved = newBaseCode;
                                     }
-                                    
+
                                     // Update saved row with new code
                                     const updatePostData = {
                                         id: savedRow.id,
@@ -2599,21 +2194,21 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                                         seller_sku_desc: savedData.seller.deskripsi || '-',
                                         change: true,
                                     };
-                                    
+
                                     try {
                                         await retry(() => api.saveProduct(updatePostData));
                                         log(`     ✅ Updated saved row ${savedRowId} (${savedSellerType}): "${savedData.code}" → "${newCodeForSaved}"`, 'success');
-                                        
+
                                         // Update saved row code in map
                                         savedRowsMap.set(savedRowId, { ...savedData, code: newCodeForSaved });
                                     } catch (updateErr) {
                                         log(`     ⚠️ Failed to update saved row ${savedRowId}: ${updateErr.message}`, 'warning');
                                     }
-                                    
+
                                     await wait(CONFIG.DELAY_BETWEEN_SAVES);
                                 }
                             }
-                            
+
                             // Determine new code based on seller type for current row
                             let newCode;
                             if (seller.type === 'MAIN') {
@@ -2625,47 +2220,21 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                             } else {
                                 newCode = newBaseCode;
                             }
-                            
+
                             log(`     ✅ Using new code for current row: ${newCode}`, 'success');
-                            
+
                             // Update finalCode and retry
                             finalCode = newCode;
-                            
-                            // Track new codes
-                            STATE.generatedCodes.add(newBaseCode);
-                            STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP1_SUFFIX);
-                            STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP2_SUFFIX);
 
                             saveRetryCount++;
                             await wait(1000); // Wait before retry
                             continue; // Retry with new code
-                            
-                        } catch (aiErr) {
-                            log(`     ❌ AI code generation failed: ${aiErr.message}`, 'error');
-                            // Fallback to script-based generation
-                            const fallbackBaseCode = generateProductCode(productName, brandName);
-                            let fallbackCode;
-                            if (seller.type === 'MAIN') {
-                                fallbackCode = fallbackBaseCode;
-                            } else if (seller.type === 'B1') {
-                                fallbackCode = fallbackBaseCode + CONFIG.BACKUP1_SUFFIX;
-                            } else if (seller.type === 'B2') {
-                                fallbackCode = fallbackBaseCode + CONFIG.BACKUP2_SUFFIX;
-                            } else {
-                                fallbackCode = fallbackBaseCode;
-                            }
-                            
-                            log(`     🔄 Using fallback code: ${fallbackCode}`, 'info');
-                            finalCode = fallbackCode;
-                            
-                            // Track fallback codes
-                            STATE.generatedCodes.add(fallbackBaseCode);
-                            STATE.generatedCodes.add(fallbackBaseCode + CONFIG.BACKUP1_SUFFIX);
-                            STATE.generatedCodes.add(fallbackBaseCode + CONFIG.BACKUP2_SUFFIX);
 
-                            saveRetryCount++;
-                            await wait(1000);
-                            continue; // Retry with fallback code
+                        } catch (telegramErr) {
+                            log(`     ❌ Telegram code request failed: ${telegramErr.message}`, 'error');
+                            STATE.errors.push({ product: productName, seller: currentSeller.seller || currentSeller.name, code: finalCode, error: `Telegram code request failed: ${telegramErr.message}` });
+                            STATE.stats.errors++;
+                            break; // Exit retry loop - cannot continue without new code
                         }
                     } else {
                         // Other 422 errors - just throw
@@ -3128,6 +2697,18 @@ const run = async (categoryFilter = null) => {
     log(`   Success Rate: ${report.stats.successRate}`, 'info');
     logSeparator('═');
     console.log('\n');
+
+    // Send completion summary to Telegram
+    if (telegramBot) {
+        await telegramBot.sendCompletionSummary({
+            total: STATE.stats.total,
+            success: STATE.stats.success,
+            skipped: STATE.stats.skipped,
+            errors: STATE.stats.errors,
+            successRate: report.stats.successRate,
+            duration: report.summary.duration
+        });
+    }
 
     return report;
 };

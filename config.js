@@ -27,11 +27,16 @@ export const CONFIG = {
     COOKIE: process.env.COOKIE || '',
 
     // =============================================================================
+    // TELEGRAM BOT
+    // =============================================================================
+    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '',
+    TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID || '',
+
+    // =============================================================================
     // OPENAI API
     // =============================================================================
     GPT_API_KEY: process.env.GPT_API_KEY || '',
     GPT_MODEL_SELLER: process.env.GPT_MODEL_SELLER || 'gpt-4.1-mini',
-    GPT_MODEL_CODE: process.env.GPT_MODEL_CODE || 'gpt-4.1-nano',
     GPT_TEMPERATURE: parseNum(process.env.GPT_TEMPERATURE, 0.1),
     GPT_MAX_TOKENS: parseNum(process.env.GPT_MAX_TOKENS, 1000),
 
@@ -123,6 +128,12 @@ export const validateConfig = () => {
     if (!CONFIG.GPT_API_KEY) {
         errors.push('GPT_API_KEY tidak di-set di .env');
     }
+    if (!CONFIG.TELEGRAM_BOT_TOKEN) {
+        errors.push('TELEGRAM_BOT_TOKEN tidak di-set di .env');
+    }
+    if (!CONFIG.TELEGRAM_CHAT_ID) {
+        errors.push('TELEGRAM_CHAT_ID tidak di-set di .env');
+    }
 
     return errors;
 };
@@ -133,7 +144,7 @@ export const printConfig = () => {
     console.log('─'.repeat(50));
     console.log(`   Mode: ${CONFIG.MODE}`);
     console.log(`   GPT Model (Seller): ${CONFIG.GPT_MODEL_SELLER}`);
-    console.log(`   GPT Model (Code): ${CONFIG.GPT_MODEL_CODE}`);
+    console.log(`   Telegram Bot: ${CONFIG.TELEGRAM_BOT_TOKEN ? 'Configured' : 'Not configured'}`);
     console.log(`   Min Rating: ${CONFIG.MIN_RATING}`);
     console.log(`   Require Unlimited: ${CONFIG.REQUIRE_UNLIMITED_STOCK}`);
     console.log(`   Require Multi: ${CONFIG.REQUIRE_MULTI}`);
