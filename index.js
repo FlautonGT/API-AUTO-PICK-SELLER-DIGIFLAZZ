@@ -1407,6 +1407,8 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
 
     let selectedSellers = [];
     let maxPrice = 0;
+    // Telegram seller confirmation result (populated when using Telegram flow)
+    let sellerConfirmResult = null;
 
     if (isStatusOnlyUpdate) {
         // Status update only - use existing sellers from rows
@@ -1668,9 +1670,21 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
 
             log(`     Context: Category=${categoryName}, Brand=${brandName}, Type=${typeName}`, 'info');
 
-            // Use code returned from Telegram during seller confirmation
-            baseCode = sellerConfirmResult && sellerConfirmResult.code;
-            log(`     ✅ Using code from Telegram confirmation: ${baseCode}`, 'success');
+            // Use code from Telegram confirmation if available, otherwise request via Telegram
+            if (sellerConfirmResult && sellerConfirmResult.code) {
+                baseCode = sellerConfirmResult.code;
+                log(`     ✅ Using code from Telegram confirmation: ${baseCode}`, 'success');
+            } else {
+                // No prior confirmation (single-seller or other path) - request code via Telegram
+                baseCode = await requestProductCodeViaTelegram(
+                    productName,
+                    brandName,
+                    categoryName,
+                    typeName,
+                    rows.length
+                );
+                log(`     ✅ Received code from Telegram: ${baseCode}`, 'success');
+            }
         } else {
             // Use existing code
             baseCode = rows[0].code;
