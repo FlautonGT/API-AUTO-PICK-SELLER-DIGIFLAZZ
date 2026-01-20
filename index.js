@@ -1524,7 +1524,6 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 }
                 
                 // Loop: select sellers via AI, then confirm via Telegram. Owner can request reselection.
-                let sellerConfirmResult;
                 let retrySellerSelection = true;
                 let excludeSellerIds = excludeIds.slice();
 
