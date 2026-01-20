@@ -6,9 +6,62 @@ import TelegramBot from 'node-telegram-bot-api';
 
 export class TelegramProductCodeBot {
     constructor(token, chatId) {
-        this.bot = new TelegramBot(token, { polling: false });
+        this.bot = new TelegramBot(token, { polling: true });
         this.chatId = chatId;
         this.pendingRequests = new Map(); // messageId -> { resolve, reject, data }
+        this.setupListeners();
+    }
+
+    setupListeners() {
+        // Listen for text messages (replies)
+        this.bot.on('message', async (msg) => {
+            if (msg.chat.id.toString() !== this.chatId.toString()) return;
+            if (!msg.reply_to_message) return;
+            
+            const replyToId = msg.reply_to_message.message_id;
+            const pending = this.pendingRequests.get(replyToId);
+            
+            if (pending) {
+                const code = msg.text.trim().toUpperCase();
+                await this.confirmProductCode(code, msg.message_id, pending.data, pending);
+            }
+        });
+
+        // Listen for callback queries (button clicks)
+        this.bot.on('callback_query', async (query) => {
+            const [action, code] = query.data.split('_');
+            
+            await this.bot.answerCallbackQuery(query.id);
+            
+            if (action === 'confirm') {
+                await this.bot.editMessageText(
+                    `✅ Kode produk *${code}* dikonfirmasi!`,
+                    {
+                        chat_id: this.chatId,
+                        message_id: query.message.message_id,
+                        parse_mode: 'Markdown'
+                    }
+                );
+                
+                // Find and resolve pending request
+                for (const [msgId, pending] of this.pendingRequests.entries()) {
+                    if (pending.confirmMessageId === query.message.message_id) {
+                        clearTimeout(pending.timeout);
+                        this.pendingRequests.delete(msgId);
+                        pending.resolve(code);
+                        break;
+                    }
+                }
+            } else if (action === 'reject') {
+                await this.bot.editMessageText(
+                    `❌ Kode produk ditolak. Silakan reply pesan awal dengan kode baru.`,
+                    {
+                        chat_id: this.chatId,
+                        message_id: query.message.message_id
+                    }
+                );
+            }
+        });
     }
 
     /**
@@ -26,7 +79,7 @@ export class TelegramProductCodeBot {
 📦 *Produk:* ${product}
 🔢 *Jumlah SKU:* ${skuCount} (${skuCount === 3 ? '1 Main 2 Backup' : skuCount === 2 ? '1 Main 1 Backup' : '1 Main 0 Backup'})
 
-Mohon konfirmasi kode produk yang akan digunakan:
+💬 *Reply pesan ini dengan kode produk yang akan digunakan*
 `;
 
         try {
@@ -36,22 +89,16 @@ Mohon konfirmasi kode produk yang akan digunakan:
 
             // Wait for owner reply
             return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    this.pendingRequests.delete(sent.message_id);
+                    reject(new Error('Timeout waiting for product code (5 minutes)'));
+                }, 300000); // 5 minutes timeout
+
                 this.pendingRequests.set(sent.message_id, {
                     resolve,
                     reject,
                     data: productData,
-                    timeout: setTimeout(() => {
-                        this.pendingRequests.delete(sent.message_id);
-                        reject(new Error('Timeout waiting for product code'));
-                    }, 300000) // 5 minutes timeout
-                });
-
-                // Listen for reply
-                this.bot.once('message', async (msg) => {
-                    if (msg.chat.id.toString() === this.chatId.toString() && msg.reply_to_message?.message_id === sent.message_id) {
-                        const code = msg.text.trim().toUpperCase();
-                        await this.confirmProductCode(code, msg.message_id, productData);
-                    }
+                    timeout
                 });
             });
         } catch (error) {
@@ -62,7 +109,7 @@ Mohon konfirmasi kode produk yang akan digunakan:
     /**
      * Konfirmasi kode produk dengan inline keyboard
      */
-    async confirmProductCode(code, replyMessageId, productData) {
+    async confirmProductCode(code, replyMessageId, productData, pending) {
         const message = `
 ✅ *Kode Produk Diterima*
 
@@ -84,51 +131,8 @@ Apakah sudah benar dan sesuai?
                 }
             });
 
-            // Wait for button click
-            return new Promise((resolve, reject) => {
-                const handler = async (query) => {
-                    if (query.message.message_id === sent.message_id) {
-                        const [action, receivedCode] = query.data.split('_');
-                        
-                        await this.bot.answerCallbackQuery(query.id);
-                        
-                        if (action === 'confirm') {
-                            await this.bot.editMessageText(
-                                `✅ Kode produk *${receivedCode}* dikonfirmasi!`,
-                                {
-                                    chat_id: this.chatId,
-                                    message_id: sent.message_id,
-                                    parse_mode: 'Markdown'
-                                }
-                            );
-                            this.bot.removeListener('callback_query', handler);
-                            
-                            // Resolve pending request
-                            const pending = Array.from(this.pendingRequests.values()).find(p => p.data === productData);
-                            if (pending) {
-                                clearTimeout(pending.timeout);
-                                pending.resolve(receivedCode);
-                            }
-                            resolve(receivedCode);
-                        } else {
-                            await this.bot.editMessageText(
-                                `❌ Kode produk ditolak. Silakan kirim kode baru.`,
-                                {
-                                    chat_id: this.chatId,
-                                    message_id: sent.message_id
-                                }
-                            );
-                            this.bot.removeListener('callback_query', handler);
-                            
-                            // Request again
-                            const newCode = await this.requestProductCode(productData);
-                            resolve(newCode);
-                        }
-                    }
-                };
-
-                this.bot.on('callback_query', handler);
-            });
+            // Store confirm message ID for callback handling
+            pending.confirmMessageId = sent.message_id;
         } catch (error) {
             throw new Error(`Failed to confirm product code: ${error.message}`);
         }
