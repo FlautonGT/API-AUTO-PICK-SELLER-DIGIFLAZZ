@@ -448,9 +448,68 @@ Apakah sudah benar?
 
     /**
      * Send error notification
+     * @param {Object|string} error - Error object or message
+     * @param {string} context - Optional context string (for backward compatibility)
      */
     async sendErrorNotification(error, context = '') {
-        const message = `
+        let message;
+        
+        // Handle new structured error format
+        if (error && typeof error === 'object' && error.type) {
+            switch (error.type) {
+                case 'AI_INSUFFICIENT_SELLERS':
+                    message = `
+⚠️ *AI Selection Warning*
+
+📦 *Produk:* ${error.product || 'Unknown'}
+❌ *Masalah:* ${error.message}
+
+📊 *Detail:*
+• Butuh: ${error.details?.needed || '?'} seller
+• Dikembalikan AI: ${error.details?.returned || '?'} seller
+• Kandidat tersedia: ${error.details?.available || '?'} seller
+• Yang terpilih: ${error.details?.selected || '-'}
+
+⏰ *Time:* ${new Date().toLocaleString('id-ID')}
+`;
+                    break;
+                    
+                case 'CHATGPT_ERROR':
+                    message = `
+🤖 *ChatGPT API Error*
+
+📦 *Produk:* ${error.product || 'Unknown'}
+❌ *Error:* ${error.message}
+
+⏰ *Time:* ${new Date().toLocaleString('id-ID')}
+`;
+                    break;
+                    
+                case 'DIGIFLAZZ_ERROR':
+                    message = `
+🌐 *Digiflazz API Error*
+
+📦 *Produk:* ${error.product || 'Unknown'}
+❌ *Error:* ${error.message}
+
+⏰ *Time:* ${new Date().toLocaleString('id-ID')}
+`;
+                    break;
+                    
+                default:
+                    message = `
+🚨 *Error Detected*
+
+📍 *Type:* ${error.type}
+📦 *Produk:* ${error.product || 'Unknown'}
+❌ *Error:* ${error.message}
+
+⏰ *Time:* ${new Date().toLocaleString('id-ID')}
+`;
+            }
+        } else {
+            // Handle legacy format (error object/string + context)
+            message = `
 🚨 *Error Detected*
 
 ${context ? `📍 *Context:* ${context}\n` : ''}
@@ -458,6 +517,7 @@ ${context ? `📍 *Context:* ${context}\n` : ''}
 
 ⏰ *Time:* ${new Date().toLocaleString('id-ID')}
 `;
+        }
 
         try {
             await this.bot.sendMessage(this.chatId, message, {

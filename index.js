@@ -1088,6 +1088,28 @@ const confirmSellersAndGetCode = async (selectedSellers, productName, brandName,
         throw new Error('Telegram bot not configured');
     }
 
+    // MODE OTOMATIS: Skip semua konfirmasi Telegram, langsung generate kode
+    if (codeMode === 'auto') {
+        // Generate kode langsung tanpa konfirmasi
+        const code = await telegramBot.generateAutoCodeWithConfirmation({
+            category: categoryName,
+            brand: brandName,
+            type: typeName,
+            product: productName,
+            skuCount
+        }, true); // true = skip konfirmasi, langsung return kode
+
+        log(`  ✅ Auto-generated code: ${code}`, 'success');
+        
+        // Track codes
+        STATE.generatedCodes.add(code);
+        STATE.generatedCodes.add(code + CONFIG.BACKUP1_SUFFIX);
+        STATE.generatedCodes.add(code + CONFIG.BACKUP2_SUFFIX);
+
+        return { needsReselect: false, code, sellers: selectedSellers };
+    }
+
+    // MODE MANUAL: Kirim konfirmasi seller dan kode via Telegram
     // Get AI reasoning from last AI call
     const aiReasoning = selectedSellers.length > 0 ? 
         `Dipilih berdasarkan: harga optimal, rating, dan availability` : 
@@ -1110,29 +1132,16 @@ const confirmSellersAndGetCode = async (selectedSellers, productName, brandName,
         return { needsReselect: true, changeType: sellerResult.changeType };
     }
 
-    // Step 3: Request product code based on mode
-    log(`  📱 Requesting product code from Telegram (mode: ${codeMode})...`, 'info');
+    // Step 3: Request product code (manual mode - minta user input)
+    log(`  📱 Requesting product code from Telegram (mode: manual)...`, 'info');
     
-    let code;
-    if (codeMode === 'auto') {
-        // Mode otomatis: generate kode dan konfirmasi
-        code = await telegramBot.generateAutoCodeWithConfirmation({
-            category: categoryName,
-            brand: brandName,
-            type: typeName,
-            product: productName,
-            skuCount
-        }, false); // false = dengan konfirmasi
-    } else {
-        // Mode manual: minta user input kode
-        code = await telegramBot.requestProductCode({
-            category: categoryName,
-            brand: brandName,
-            type: typeName,
-            product: productName,
-            skuCount
-        });
-    }
+    const code = await telegramBot.requestProductCode({
+        category: categoryName,
+        brand: brandName,
+        type: typeName,
+        product: productName,
+        skuCount
+    });
 
     log(`  ✅ Received code: ${code}`, 'success');
     
@@ -1155,14 +1164,14 @@ const requestProductCodeViaTelegram = async (productName, brandName, categoryNam
     let code;
 
     if (codeMode === 'auto') {
-        // Mode otomatis: generate kode dan konfirmasi
+        // Mode otomatis: generate kode langsung TANPA konfirmasi
         code = await telegramBot.generateAutoCodeWithConfirmation({
             category: categoryName,
             brand: brandName,
             type: typeName || 'Umum',
             product: productName,
             skuCount: skuCount
-        }, false); // false = dengan konfirmasi
+        }, true); // true = skip konfirmasi, langsung return kode
     } else {
         // Mode manual: minta user input kode
         code = await telegramBot.requestProductCode({
@@ -1857,6 +1866,27 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
 
                 while (retrySellerSelection) {
                     selectedSellers = await getAISellers(candidates, productName, usedList, excludeSellerIds, neededSellers);
+                    
+                    // VALIDATION: Check if AI returned enough sellers
+                    if (selectedSellers.length < neededSellers && candidates.length >= neededSellers) {
+                        const errorMsg = `AI hanya mengembalikan ${selectedSellers.length} seller, padahal butuh ${neededSellers} dan tersedia ${candidates.length} kandidat`;
+                        log(`  ⚠️ ${errorMsg}`, 'warning');
+                        
+                        // Send error notification to Telegram
+                        if (telegramBot) {
+                            await telegramBot.sendErrorNotification({
+                                type: 'AI_INSUFFICIENT_SELLERS',
+                                product: productName,
+                                message: errorMsg,
+                                details: {
+                                    needed: neededSellers,
+                                    returned: selectedSellers.length,
+                                    available: candidates.length,
+                                    selected: selectedSellers.map(s => s.seller || s.name).join(', ')
+                                }
+                            });
+                        }
+                    }
                     
                     // Confirm sellers and get code via Telegram
                     sellerConfirmResult = await confirmSellersAndGetCode(
