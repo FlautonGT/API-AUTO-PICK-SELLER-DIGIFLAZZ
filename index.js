@@ -204,7 +204,17 @@ const api = {
             if (res.status === 429) {
                 const rateLimitRetry = options._rateLimitRetry || 0;
                 if (rateLimitRetry >= CONFIG.MAX_RATE_LIMIT_RETRIES) {
-                    throw new Error(`Digiflazz API rate limit exceeded after ${rateLimitRetry} retries on ${endpoint}`);
+                    const errorMsg = `Digiflazz API rate limit exceeded after ${rateLimitRetry} retries on ${endpoint}`;
+                    
+                    // Send Telegram notification for rate limit exceeded
+                    if (telegramBot) {
+                        await telegramBot.sendErrorNotification(
+                            { message: errorMsg },
+                            'Digiflazz Rate Limit Exceeded (Max Retries)'
+                        );
+                    }
+                    
+                    throw new Error(errorMsg);
                 }
                 const sleepDuration = CONFIG.RATE_LIMIT_SLEEP_DURATION * Math.pow(2, rateLimitRetry);
                 log(`🚨 Rate limit detected (429) on ${endpoint} - retry ${rateLimitRetry + 1}/${CONFIG.MAX_RATE_LIMIT_RETRIES}`, 'error');
@@ -270,6 +280,22 @@ const api = {
                 if (res.status >= 500) {
                     log(`⚠️ Server error (${res.status}), waiting ${CONFIG.DELAY_ON_ERROR}ms...`, 'warning');
                     await wait(CONFIG.DELAY_ON_ERROR);
+                    
+                    // Send Telegram notification for server errors
+                    if (telegramBot) {
+                        await telegramBot.sendErrorNotification(
+                            { message: `Server Error ${res.status} on ${endpoint}` },
+                            `Digiflazz API Error (5xx)`
+                        );
+                    }
+                }
+                
+                // Send Telegram notification for other significant errors (400, 403, 404, 422)
+                if ([400, 403, 404, 422].includes(res.status) && telegramBot) {
+                    await telegramBot.sendErrorNotification(
+                        { message: `${errorMsg.substring(0, 200)}` },
+                        `Digiflazz API Error (${res.status}) - ${endpoint}`
+                    );
                 }
                 
                 const error = new Error(errorMsg);
@@ -285,6 +311,14 @@ const api = {
             if (e.message.includes('fetch') || e.message.includes('network') || e.message.includes('timeout')) {
                 log(`⚠️ Network error, waiting ${CONFIG.DELAY_ON_ERROR}ms...`, 'warning');
                 await wait(CONFIG.DELAY_ON_ERROR);
+                
+                // Send Telegram notification for network errors
+                if (telegramBot) {
+                    await telegramBot.sendErrorNotification(
+                        { message: `Network Error: ${e.message}` },
+                        `Digiflazz Network Error - ${endpoint}`
+                    );
+                }
             }
             
             // Log request body if available (from error object or options)
@@ -754,7 +788,17 @@ const callGPTAPI = async (userMessage, rateLimitRetry = 0) => {
     // Handle rate limit (429) with exponential backoff
     if (res.status === 429) {
         if (rateLimitRetry >= CONFIG.MAX_RATE_LIMIT_RETRIES) {
-            throw new Error(`GPT API rate limit exceeded after ${rateLimitRetry} retries. Please check your OpenAI quota at https://platform.openai.com/usage`);
+            const errorMsg = `GPT API rate limit exceeded after ${rateLimitRetry} retries. Please check your OpenAI quota at https://platform.openai.com/usage`;
+            
+            // Send Telegram notification for rate limit exceeded
+            if (telegramBot) {
+                await telegramBot.sendErrorNotification(
+                    { message: errorMsg },
+                    'ChatGPT Rate Limit Exceeded (Max Retries)'
+                );
+            }
+            
+            throw new Error(errorMsg);
         }
         const sleepDuration = CONFIG.RATE_LIMIT_SLEEP_DURATION * Math.pow(2, rateLimitRetry);
         log(`🚨 GPT API rate limit detected (429) - retry ${rateLimitRetry + 1}/${CONFIG.MAX_RATE_LIMIT_RETRIES}`, 'error');
@@ -772,13 +816,35 @@ const callGPTAPI = async (userMessage, rateLimitRetry = 0) => {
 
     if (!res.ok) {
         const err = await res.text();
-        throw new Error(`GPT API ${res.status}: ${err.substring(0, 100)}`);
+        const errorMsg = `GPT API ${res.status}: ${err.substring(0, 200)}`;
+        
+        // Send Telegram notification for GPT API errors
+        if (telegramBot) {
+            await telegramBot.sendErrorNotification(
+                { message: errorMsg },
+                `ChatGPT API Error (Status: ${res.status})`
+            );
+        }
+        
+        throw new Error(errorMsg);
     }
 
     const data = await res.json();
     const content = data.choices[0]?.message?.content;
 
-    if (!content) throw new Error('GPT returned empty response');
+    if (!content) {
+        const errorMsg = 'GPT returned empty response';
+        
+        // Send Telegram notification for empty response
+        if (telegramBot) {
+            await telegramBot.sendErrorNotification(
+                { message: errorMsg },
+                'ChatGPT Empty Response'
+            );
+        }
+        
+        throw new Error(errorMsg);
+    }
     return JSON.parse(content);
 };
 

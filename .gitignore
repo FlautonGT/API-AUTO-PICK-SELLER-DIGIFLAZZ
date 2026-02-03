@@ -4,6 +4,7 @@ add-product.js
 delete-all-product.js
 tmpclaude*
 response_digiflazz.json
+.gitignore
 
 # IDE files
 .idea/
