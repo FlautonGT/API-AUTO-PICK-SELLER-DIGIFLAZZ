@@ -3,12 +3,20 @@
  */
 
 import TelegramBot from 'node-telegram-bot-api';
+import { generateProductCode, makeUniqueCode } from './product-code-config.js';
+
+// Re-export for backward compatibility
+const generateAutoCode = generateProductCode;
 
 export class TelegramProductCodeBot {
     constructor(token, chatId) {
         this.bot = new TelegramBot(token, { polling: true });
         this.chatId = chatId;
         this.pendingRequests = new Map();
+        this.codeMode = null; // 'manual' atau 'auto'
+        this.isInitialized = false;
+        this.modePromiseResolver = null;
+        this.generatedCodes = new Set(); // Track codes yang sudah di-generate
         this.setupListeners();
     }
 
@@ -31,8 +39,13 @@ export class TelegramProductCodeBot {
             
             const data = query.data;
             
+            // Handle code mode selection (startup)
+            if (data.startsWith('mode_')) {
+                const mode = data.replace('mode_', '');
+                await this.handleModeSelection(mode, query.message.message_id);
+            }
             // Handle seller confirmation
-            if (data.startsWith('seller_')) {
+            else if (data.startsWith('seller_')) {
                 const action = data.replace('seller_', '');
                 await this.handleSellerAction(action, query.message.message_id);
             }
@@ -41,7 +54,208 @@ export class TelegramProductCodeBot {
                 const [_, action, code] = data.split('_');
                 await this.handleCodeConfirmation(action, code, query.message.message_id);
             }
+            // Handle auto code confirmation
+            else if (data.startsWith('autocode_')) {
+                const parts = data.split('_');
+                const action = parts[1]; // 'yes' atau 'no'
+                const code = parts.slice(2).join('_'); // code bisa mengandung underscore
+                await this.handleAutoCodeConfirmation(action, code, query.message.message_id);
+            }
         });
+    }
+
+    /**
+     * Request code mode selection at startup
+     */
+    async requestCodeMode() {
+        if (this.isInitialized && this.codeMode) {
+            return this.codeMode;
+        }
+
+        const message = `
+🚀 *Digi Picker Seller Started*
+
+Pilih mode pembuatan kode produk:
+
+📝 *Manual* - Anda akan diminta menulis kode untuk setiap produk
+🤖 *Otomatis* - Kode dibuat otomatis berdasarkan kategori, brand, dan type
+
+Contoh kode otomatis:
+• Telkomsel 10.000 → \`S10\`
+• Mobile Legend 86 Diamond → \`ML86\`
+• PLN 50.000 → \`PLN50\`
+
+⏰ *Time:* ${new Date().toLocaleString('id-ID')}
+`;
+
+        try {
+            const sent = await this.bot.sendMessage(this.chatId, message, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            { text: '📝 Manual', callback_data: 'mode_manual' },
+                            { text: '🤖 Otomatis', callback_data: 'mode_auto' }
+                        ]
+                    ]
+                }
+            });
+
+            return new Promise((resolve) => {
+                this.modePromiseResolver = resolve;
+                this.pendingRequests.set(sent.message_id, {
+                    type: 'mode',
+                    resolve
+                });
+            });
+        } catch (error) {
+            console.error('Failed to send mode selection:', error);
+            // Default to manual if failed
+            return 'manual';
+        }
+    }
+
+    async handleModeSelection(mode, messageId) {
+        this.codeMode = mode;
+        this.isInitialized = true;
+
+        const modeText = mode === 'auto' ? '🤖 Otomatis' : '📝 Manual';
+        
+        await this.bot.editMessageText(
+            `✅ Mode kode produk: *${modeText}*\n\nScript akan berjalan dengan mode ini.`,
+            {
+                chat_id: this.chatId,
+                message_id: messageId,
+                parse_mode: 'Markdown'
+            }
+        );
+
+        // Resolve pending request
+        const pending = this.pendingRequests.get(messageId);
+        if (pending && pending.resolve) {
+            this.pendingRequests.delete(messageId);
+            pending.resolve(mode);
+        }
+
+        // Also resolve via modePromiseResolver if available
+        if (this.modePromiseResolver) {
+            this.modePromiseResolver(mode);
+            this.modePromiseResolver = null;
+        }
+    }
+
+    /**
+     * Get current code mode
+     */
+    getCodeMode() {
+        return this.codeMode;
+    }
+
+    /**
+     * Track code as used (to avoid duplicates)
+     */
+    trackCode(code) {
+        this.generatedCodes.add(code);
+        this.generatedCodes.add(code + 'B1');
+        this.generatedCodes.add(code + 'B2');
+    }
+
+    /**
+     * Generate auto code and optionally confirm via Telegram
+     */
+    async generateAutoCodeWithConfirmation(productData, skipConfirmation = false) {
+        const { category, brand, type, product } = productData;
+        
+        // Generate code and make unique
+        let autoCode = generateAutoCode(category, brand, type, product);
+        autoCode = makeUniqueCode(autoCode, this.generatedCodes);
+        
+        // Track the code immediately to prevent duplicates
+        this.trackCode(autoCode);
+        
+        if (skipConfirmation) {
+            return autoCode;
+        }
+
+        // Send confirmation message
+        const message = `
+🤖 *Auto Generated Code*
+
+📁 *Kategori:* ${category}
+🏷️ *Brand:* ${brand}
+📋 *Tipe:* ${type || 'Umum'}
+📦 *Produk:* ${product}
+🔑 *Kode:* \`${autoCode}\`
+
+Gunakan kode ini?
+`;
+
+        try {
+            const sent = await this.bot.sendMessage(this.chatId, message, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            { text: '✅ Ya', callback_data: `autocode_yes_${autoCode}` },
+                            { text: '✏️ Ganti Manual', callback_data: `autocode_no_${autoCode}` }
+                        ]
+                    ]
+                }
+            });
+
+            return new Promise((resolve) => {
+                this.pendingRequests.set(sent.message_id, {
+                    resolve,
+                    type: 'autocode',
+                    data: productData,
+                    autoCode
+                });
+            });
+        } catch (error) {
+            // If failed to send, return auto code directly
+            console.error('Failed to confirm auto code:', error);
+            return autoCode;
+        }
+    }
+
+    async handleAutoCodeConfirmation(action, code, messageId) {
+        const pending = Array.from(this.pendingRequests.entries()).find(
+            ([id, p]) => p.type === 'autocode' && this.pendingRequests.get(id)
+        );
+
+        if (!pending) return;
+
+        const [pendingMsgId, pendingData] = pending;
+
+        if (action === 'yes') {
+            // Accept auto code
+            await this.bot.editMessageText(
+                `✅ Kode produk *${code}* dikonfirmasi!`,
+                {
+                    chat_id: this.chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown'
+                }
+            );
+            
+            this.pendingRequests.delete(pendingMsgId);
+            pendingData.resolve(code);
+        } else {
+            // Switch to manual input
+            await this.bot.editMessageText(
+                `✏️ Silakan tulis kode produk manual...\n\n📦 *Produk:* ${pendingData.data.product}`,
+                {
+                    chat_id: this.chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown'
+                }
+            );
+
+            // Request manual code
+            this.pendingRequests.delete(pendingMsgId);
+            const manualCode = await this.requestProductCode(pendingData.data);
+            pendingData.resolve(manualCode);
+        }
     }
 
     /**
@@ -332,3 +546,6 @@ Token Digiflazz sudah tidak valid.
         }
     }
 }
+
+// Export generateAutoCode for external use
+export { generateAutoCode };

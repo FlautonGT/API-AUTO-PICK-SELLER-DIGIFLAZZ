@@ -38,6 +38,9 @@ if (CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
     telegramBot = new TelegramProductCodeBot(CONFIG.TELEGRAM_BOT_TOKEN, CONFIG.TELEGRAM_CHAT_ID);
 }
 
+// Code mode: 'manual' atau 'auto' (ditentukan saat startup via Telegram)
+let codeMode = null;
+
 // =============================================================================
 // LOGGER
 // =============================================================================
@@ -797,6 +800,30 @@ ${JSON.stringify(sellerData)}`;
         throw new Error('No valid sellers from AI response');
     }
 
+    // VALIDATION: Ensure all selected sellers have unique IDs
+    const sellerIds = enrichedSellers.map(s => s.id).filter(Boolean);
+    const uniqueIds = new Set(sellerIds);
+    if (sellerIds.length !== uniqueIds.size) {
+        log(`  ⚠️ WARNING: AI selected duplicate seller IDs! IDs: ${sellerIds.join(', ')}`, 'warning');
+        // Remove duplicates by keeping only the first occurrence of each ID
+        const seenIds = new Set();
+        const deduplicatedSellers = enrichedSellers.filter(s => {
+            if (!s.id || seenIds.has(s.id)) {
+                log(`  ❌ Removing duplicate seller: ${s.seller || s.name} (ID: ${s.id})`, 'warning');
+                return false;
+            }
+            seenIds.add(s.id);
+            return true;
+        });
+        
+        if (deduplicatedSellers.length === 0) {
+            throw new Error('All sellers were duplicates after deduplication');
+        }
+        
+        log(`  📋 Final sellers (after deduplication): ${deduplicatedSellers.map(s => `${s.type}=${s.seller || s.name}@${formatRp(s.price)}`).join(', ')}`, 'ai');
+        return deduplicatedSellers;
+    }
+
     log(`  📋 Final sellers: ${enrichedSellers.map(s => `${s.type}=${s.seller || s.name}@${formatRp(s.price)}`).join(', ')}`, 'ai');
     return enrichedSellers;
 };
@@ -836,15 +863,29 @@ const confirmSellersAndGetCode = async (selectedSellers, productName, brandName,
         return { needsReselect: true, changeType: sellerResult.changeType };
     }
 
-    // Step 3: Request product code
-    log(`  📱 Requesting product code from Telegram...`, 'info');
-    const code = await telegramBot.requestProductCode({
-        category: categoryName,
-        brand: brandName,
-        type: typeName,
-        product: productName,
-        skuCount
-    });
+    // Step 3: Request product code based on mode
+    log(`  📱 Requesting product code from Telegram (mode: ${codeMode})...`, 'info');
+    
+    let code;
+    if (codeMode === 'auto') {
+        // Mode otomatis: generate kode dan konfirmasi
+        code = await telegramBot.generateAutoCodeWithConfirmation({
+            category: categoryName,
+            brand: brandName,
+            type: typeName,
+            product: productName,
+            skuCount
+        }, false); // false = dengan konfirmasi
+    } else {
+        // Mode manual: minta user input kode
+        code = await telegramBot.requestProductCode({
+            category: categoryName,
+            brand: brandName,
+            type: typeName,
+            product: productName,
+            skuCount
+        });
+    }
 
     log(`  ✅ Received code: ${code}`, 'success');
     
@@ -862,15 +903,29 @@ const requestProductCodeViaTelegram = async (productName, brandName, categoryNam
         throw new Error('Telegram bot not configured');
     }
 
-    log(`  📩 Requesting product code via Telegram...`, 'info');
+    log(`  📩 Requesting product code via Telegram (mode: ${codeMode})...`, 'info');
 
-    const code = await telegramBot.requestProductCode({
-        category: categoryName,
-        brand: brandName,
-        type: typeName || 'Umum',
-        product: productName,
-        skuCount: skuCount
-    });
+    let code;
+
+    if (codeMode === 'auto') {
+        // Mode otomatis: generate kode dan konfirmasi
+        code = await telegramBot.generateAutoCodeWithConfirmation({
+            category: categoryName,
+            brand: brandName,
+            type: typeName || 'Umum',
+            product: productName,
+            skuCount: skuCount
+        }, false); // false = dengan konfirmasi
+    } else {
+        // Mode manual: minta user input kode
+        code = await telegramBot.requestProductCode({
+            category: categoryName,
+            brand: brandName,
+            type: typeName || 'Umum',
+            product: productName,
+            skuCount: skuCount
+        });
+    }
 
     log(`  ✅ Received code from Telegram: ${code}`, 'success');
 
@@ -997,23 +1052,35 @@ const checkCodeConsistency = (rows) => {
     }
     
     // Inconsistent: multiple base codes found
-    // Use the most common base code (or first one if equal)
-    const baseCodeCount = {};
-    baseCodes.forEach(b => {
-        if (b !== '') {
-            baseCodeCount[b] = (baseCodeCount[b] || 0) + 1;
-        }
-    });
+    // PRIORITAS: Gunakan base code dari MAIN (row tanpa suffix B1/B2)
+    // Jika tidak ada MAIN, baru gunakan most common base code
+    let selectedBaseCode = '';
     
-    const sorted = Object.entries(baseCodeCount).sort((a, b) => b[1] - a[1]);
-    const mostCommonBaseCode = sorted.length > 0 ? sorted[0][0] : baseCodes[0] || '';
+    // Priority 1: Use MAIN's base code if exists
+    if (codeTypes.main && codeTypes.main.baseCode) {
+        selectedBaseCode = codeTypes.main.baseCode;
+        log(`  📋 Code consistency: Using MAIN's base code: ${selectedBaseCode}`, 'info');
+    } else {
+        // Priority 2: Use most common base code
+        const baseCodeCount = {};
+        baseCodes.forEach(b => {
+            if (b !== '') {
+                baseCodeCount[b] = (baseCodeCount[b] || 0) + 1;
+            }
+        });
+        
+        const sorted = Object.entries(baseCodeCount).sort((a, b) => b[1] - a[1]);
+        selectedBaseCode = sorted.length > 0 ? sorted[0][0] : baseCodes[0] || '';
+        log(`  📋 Code consistency: No MAIN found, using most common: ${selectedBaseCode}`, 'info');
+    }
     
     return { 
         isConsistent: false, 
-        baseCode: mostCommonBaseCode, 
+        baseCode: selectedBaseCode, 
         needsFix: true,
         existingCodes: rowCodes,
-        baseCodes: uniqueBaseCodes
+        baseCodes: uniqueBaseCodes,
+        mainBaseCode: codeTypes.main?.baseCode || null
     };
 };
 
@@ -1091,61 +1158,71 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         log(`  ⚠️ Code inconsistency detected!`, 'warning');
         log(`     Existing codes: ${consistencyCheck.existingCodes.join(', ')}`, 'info');
         log(`     Base codes found: ${consistencyCheck.baseCodes.join(', ')}`, 'info');
-        log(`  🔧 Fixing code consistency by generating NEW base code...`, 'info');
         
-        // Generate NEW base code (don't use existing codes to avoid conflicts)
+        // PRIORITAS: Gunakan base code dari MAIN jika ada
+        // Jika tidak ada MAIN, baru request kode baru via Telegram
         let newBaseCode;
-        try {
-            // Get all existing codes to exclude
-            const allExistingCodes = [];
-            rows.forEach((row) => {
-                if (row.code && row.code.trim() !== '') {
-                    const code = row.code.trim();
-                    allExistingCodes.push(code);
-                    // Also add base code and variants
-                    const baseCode = getBaseCode(code);
-                    if (baseCode) {
-                        allExistingCodes.push(baseCode);
-                        allExistingCodes.push(baseCode + CONFIG.BACKUP1_SUFFIX);
-                        allExistingCodes.push(baseCode + CONFIG.BACKUP2_SUFFIX);
+        
+        if (consistencyCheck.mainBaseCode) {
+            // Use MAIN's base code - B1 and B2 should follow MAIN
+            newBaseCode = consistencyCheck.mainBaseCode;
+            log(`  🔧 Using MAIN's base code: ${newBaseCode} (B1/B2 will follow MAIN)`, 'info');
+        } else {
+            // No MAIN found, generate new base code
+            log(`  🔧 No MAIN found, generating NEW base code...`, 'info');
+            
+            try {
+                // Get all existing codes to exclude
+                const allExistingCodes = [];
+                rows.forEach((row) => {
+                    if (row.code && row.code.trim() !== '') {
+                        const code = row.code.trim();
+                        allExistingCodes.push(code);
+                        // Also add base code and variants
+                        const baseCode = getBaseCode(code);
+                        if (baseCode) {
+                            allExistingCodes.push(baseCode);
+                            allExistingCodes.push(baseCode + CONFIG.BACKUP1_SUFFIX);
+                            allExistingCodes.push(baseCode + CONFIG.BACKUP2_SUFFIX);
+                        }
                     }
-                }
-            });
-            
-            // Add to STATE.generatedCodes to avoid conflicts
-            allExistingCodes.forEach(code => STATE.generatedCodes.add(code));
+                });
+                
+                // Add to STATE.generatedCodes to avoid conflicts
+                allExistingCodes.forEach(code => STATE.generatedCodes.add(code));
 
-            // Get type name for Telegram request
-            const typeName = resolvedTypeName;
+                // Get type name for Telegram request
+                const typeName = resolvedTypeName;
 
-            log(`     📩 Requesting new base code via Telegram (excluding: ${allExistingCodes.join(', ')})...`, 'info');
+                log(`     📩 Requesting new base code via Telegram (excluding: ${allExistingCodes.join(', ')})...`, 'info');
 
-            // Request code via Telegram
-            newBaseCode = await requestProductCodeViaTelegram(
-                productName,
-                brandName,
-                categoryName,
-                typeName,
-                rows.length
-            );
-            log(`     ✅ Received new base code: ${newBaseCode}`, 'success');
-            
-            // Track new codes
-            STATE.generatedCodes.add(newBaseCode);
-            STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP1_SUFFIX);
-            STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP2_SUFFIX);
-            
-        } catch (genErr) {
-            log(`     ❌ Failed to generate new base code: ${genErr.message}`, 'error');
-            STATE.errors.push({ 
-                product: productName, 
-                error: `Code consistency: Failed to generate new base code - ${genErr.message}` 
-            });
-            STATE.stats.errors += rows.length;
-            return; // Skip this product group
+                // Request code via Telegram
+                newBaseCode = await requestProductCodeViaTelegram(
+                    productName,
+                    brandName,
+                    categoryName,
+                    typeName,
+                    rows.length
+                );
+                log(`     ✅ Received new base code: ${newBaseCode}`, 'success');
+                
+            } catch (genErr) {
+                log(`     ❌ Failed to generate new base code: ${genErr.message}`, 'error');
+                STATE.errors.push({ 
+                    product: productName, 
+                    error: `Code consistency: Failed to generate new base code - ${genErr.message}` 
+                });
+                STATE.stats.errors += rows.length;
+                return; // Skip this product group
+            }
         }
         
-        log(`     📋 Will use new base code: ${newBaseCode}`, 'info');
+        // Track new codes
+        STATE.generatedCodes.add(newBaseCode);
+        STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP1_SUFFIX);
+        STATE.generatedCodes.add(newBaseCode + CONFIG.BACKUP2_SUFFIX);
+        
+        log(`     📋 Will use base code: ${newBaseCode}`, 'info');
         
         // Track rows that need to be updated via API
         const rowsToUpdateViaAPI = [];
@@ -1503,6 +1580,10 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                 };
             });
             log(`  ✅ Assigned 1 seller to all ${selectedSellers.length} row(s)`, 'success');
+            
+            // For single seller case, we still need to get product code via Telegram
+            // Set sellerConfirmResult to indicate code is needed but sellers are fixed
+            sellerConfirmResult = { needsReselect: false, code: null, sellers: selectedSellers };
         } else {
             // Multiple sellers: use AI selection
             // Determine minimum candidates: if sellers >= 3, send at least 3
@@ -1670,11 +1751,13 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
             log(`     Context: Category=${categoryName}, Brand=${brandName}, Type=${typeName}`, 'info');
 
             // Use code from Telegram confirmation if available, otherwise request via Telegram
-            if (sellerConfirmResult && sellerConfirmResult.code) {
+            if (sellerConfirmResult && sellerConfirmResult.code && sellerConfirmResult.code.trim() !== '') {
                 baseCode = sellerConfirmResult.code;
                 log(`     ✅ Using code from Telegram confirmation: ${baseCode}`, 'success');
             } else {
-                // No prior confirmation (single-seller or other path) - request code via Telegram
+                // No prior confirmation code - request code via Telegram
+                // This handles: single-seller case, status-only update, or when code wasn't provided
+                log(`     📩 Requesting product code via Telegram (sellerConfirmResult.code was ${sellerConfirmResult?.code || 'null'})...`, 'info');
                 baseCode = await requestProductCodeViaTelegram(
                     productName,
                     brandName,
@@ -2088,16 +2171,30 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                             log(`     ⚠️ ${savedRowsMap.size} row(s) already saved - will update ALL rows with new base code for consistency`, 'warning');
                         }
 
-                        // Request new code via Telegram
+                        // Request new code via Telegram based on mode
                         try {
-                            log(`     📩 Requesting new product code via Telegram...`, 'info');
-                            const newBaseCode = await telegramBot.requestProductCode({
-                                category: categoryName,
-                                brand: brandName,
-                                type: resolvedTypeName,
-                                product: productName,
-                                skuCount: rows.length
-                            });
+                            log(`     📩 Requesting new product code via Telegram (mode: ${codeMode})...`, 'info');
+                            let newBaseCode;
+                            
+                            if (codeMode === 'auto') {
+                                // Mode otomatis: generate kode dan konfirmasi
+                                newBaseCode = await telegramBot.generateAutoCodeWithConfirmation({
+                                    category: categoryName,
+                                    brand: brandName,
+                                    type: resolvedTypeName,
+                                    product: productName,
+                                    skuCount: rows.length
+                                }, false);
+                            } else {
+                                // Mode manual: minta user input kode
+                                newBaseCode = await telegramBot.requestProductCode({
+                                    category: categoryName,
+                                    brand: brandName,
+                                    type: resolvedTypeName,
+                                    product: productName,
+                                    skuCount: rows.length
+                                });
+                            }
 
                             // Track generated codes
                             STATE.generatedCodes.add(newBaseCode);
@@ -2768,6 +2865,18 @@ const main = async () => {
     if (options.test) {
         const success = await testConnection();
         process.exit(success ? 0 : 1);
+    }
+
+    // Request code mode via Telegram at startup
+    if (telegramBot && CONFIG.SET_PRODUCT_CODE) {
+        log('📱 Requesting code mode selection via Telegram...', 'info');
+        log('   Waiting for user to select Manual or Auto mode...', 'info');
+        codeMode = await telegramBot.requestCodeMode();
+        log(`✅ Code mode selected: ${codeMode === 'auto' ? '🤖 Otomatis' : '📝 Manual'}`, 'success');
+    } else {
+        // Default to manual if no telegram or product code disabled
+        codeMode = 'manual';
+        log(`⚠️ Code mode defaulted to: Manual (Telegram not configured or SET_PRODUCT_CODE=false)`, 'warning');
     }
 
     await run(options.categories);
