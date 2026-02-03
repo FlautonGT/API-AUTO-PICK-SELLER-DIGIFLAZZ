@@ -101,7 +101,7 @@ export const CONFIG = {
     // =============================================================================
     // AI SETTINGS
     // =============================================================================
-    MAX_AI_CANDIDATES: parseNum(process.env.MAX_AI_CANDIDATES, 20),
+    MAX_AI_CANDIDATES: parseNum(process.env.MAX_AI_CANDIDATES, 10), // Max 10 pre-scored candidates sent to AI
     MIN_DESCRIPTION_LENGTH: parseNum(process.env.MIN_DESCRIPTION_LENGTH, 15),
     DESCRIPTION_BLACKLIST: parseArray(process.env.DESCRIPTION_BLACKLIST, [
         'testing', 'test', 'percobaan', 'trial', 'demo',

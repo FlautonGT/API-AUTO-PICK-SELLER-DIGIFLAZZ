@@ -508,112 +508,227 @@ const filterSellers = (sellers) => {
     return filtered;
 };
 
+/**
+ * Calculate seller score for pre-sorting before AI
+ * 
+ * Scoring criteria (higher = better):
+ * 1. Price Score (0-40 points): Cheaper = higher score
+ * 2. Description Score (0-30 points): Longer & quality keywords = higher score
+ * 3. Cutoff Score (0-20 points): 24h = 20, partial = 10, none = 0
+ * 4. Rating Score (0-10 points): Higher rating = higher score
+ */
+const calculateSellerScore = (seller, priceStats) => {
+    let score = 0;
+    const details = {};
+    
+    // === 1. PRICE SCORE (0-40 points) ===
+    // Normalize price: cheapest gets 40, most expensive gets 0
+    const price = seller.price || 999999;
+    if (priceStats.range > 0) {
+        const priceRatio = (priceStats.max - price) / priceStats.range;
+        score += Math.round(priceRatio * 40);
+        details.price = Math.round(priceRatio * 40);
+    } else {
+        score += 40; // All same price
+        details.price = 40;
+    }
+    
+    // === 2. DESCRIPTION SCORE (0-30 points) ===
+    const desc = (seller.deskripsi || '').toLowerCase();
+    let descScore = 0;
+    
+    // Length score (0-10): longer descriptions tend to be more informative
+    const descLength = desc.length;
+    if (descLength >= 100) descScore += 10;
+    else if (descLength >= 50) descScore += 7;
+    else if (descLength >= 20) descScore += 4;
+    else if (descLength > 0) descScore += 1;
+    
+    // Quality keywords (0-20):
+    // Zona/Coverage keywords (+5)
+    if (/nasional|all\s*zone|lintas|seluruh\s*indonesia|se-?indonesia/i.test(desc)) {
+        descScore += 5;
+    }
+    // Speed keywords (+5)
+    if (/detik(an)?|instant|cepat|1-\d+\s*detik|proses\s*cepat|fast/i.test(desc)) {
+        descScore += 5;
+    }
+    // Stock keywords (+5)
+    if (/stok\s*(sendiri|terjamin|aman)|full\s*ngrs|chip\s*sendiri|stock\s*ready/i.test(desc)) {
+        descScore += 5;
+    }
+    // Stability keywords (+5)
+    if (/stabil|stable|lancar|smooth|jarang\s*gangguan|minim\s*gangguan/i.test(desc)) {
+        descScore += 5;
+    }
+    
+    // Penalty for bad keywords (-10)
+    if (/testing|maintenance|transfer|khusus\s*(jawa|zona|sumatera)|zona\s*\d+\s*(saja|only)/i.test(desc)) {
+        descScore -= 10;
+    }
+    
+    descScore = Math.max(0, Math.min(30, descScore)); // Clamp 0-30
+    score += descScore;
+    details.desc = descScore;
+    
+    // === 3. CUTOFF SCORE (0-20 points) ===
+    const is24h = seller.start_cut_off === '00:00' && seller.end_cut_off === '00:00';
+    if (is24h) {
+        score += 20;
+        details.cutoff = 20;
+    } else {
+        // Calculate operational hours
+        const parseTime = (t) => {
+            if (!t) return 0;
+            const [h, m] = t.split(':').map(Number);
+            return h * 60 + (m || 0);
+        };
+        const startMin = parseTime(seller.start_cut_off);
+        const endMin = parseTime(seller.end_cut_off);
+        
+        // Calculate operational hours (handle overnight)
+        let operationalMins;
+        if (endMin > startMin) {
+            operationalMins = endMin - startMin;
+        } else {
+            operationalMins = (24 * 60 - startMin) + endMin;
+        }
+        
+        // More operational hours = higher score
+        const hourRatio = operationalMins / (24 * 60);
+        const cutoffScore = Math.round(hourRatio * 15); // Max 15 for non-24h
+        score += cutoffScore;
+        details.cutoff = cutoffScore;
+    }
+    
+    // === 4. RATING SCORE (0-10 points) ===
+    const rating = seller.reviewAvg || 0;
+    const ratingScore = Math.round((rating / 5) * 10);
+    score += ratingScore;
+    details.rating = ratingScore;
+    
+    return { score, details };
+};
+
 const prepareSellersForAI = (sellers, minCandidates = 3) => {
+    if (!sellers || sellers.length === 0) return [];
+    
     // Determine minimum candidates needed
-    // If sellers >= 3, send at least 3. If sellers < 3, send what's available
     const actualMin = sellers.length >= 3 ? Math.max(minCandidates, 3) : sellers.length;
     
-    const sorted = [...sellers].sort((a, b) => a.price - b.price);
-    const cheapest = sorted.slice(0, 10);
-    const highRated = [...sellers]
-        .filter(s => s.reviewAvg && s.reviewAvg >= 3)
-        .sort((a, b) => (b.reviewAvg || 0) - (a.reviewAvg || 0))
-        .slice(0, 5);
-    const is24h = sellers
-        .filter(s => s.start_cut_off === '00:00' && s.end_cut_off === '00:00')
-        .slice(0, 5);
-
-    const map = new Map();
-    [...cheapest, ...highRated, ...is24h].forEach(s => {
-        if (!map.has(s.id)) map.set(s.id, s);
-    });
-
-    const candidates = Array.from(map.values());
+    // Calculate price statistics for normalization
+    const prices = sellers.map(s => s.price || 999999);
+    const priceStats = {
+        min: Math.min(...prices),
+        max: Math.max(...prices),
+        range: Math.max(...prices) - Math.min(...prices)
+    };
     
-    // Ensure minimum candidates: if sellers >= 3, send at least 3
-    // If we have less than minCandidates, add more from sorted list
-    if (candidates.length < actualMin && sellers.length >= actualMin) {
-        // Add more sellers from sorted list to reach minimum
-        for (const s of sorted) {
-            if (!map.has(s.id)) {
-                map.set(s.id, s);
-                candidates.push(s);
-                if (candidates.length >= actualMin) break;
-            }
+    // Score all sellers
+    const scoredSellers = sellers.map(seller => {
+        const { score, details } = calculateSellerScore(seller, priceStats);
+        return { ...seller, _score: score, _scoreDetails: details };
+    });
+    
+    // Sort by score (highest first)
+    scoredSellers.sort((a, b) => b._score - a._score);
+    
+    // Log top candidates (verbose)
+    if (CONFIG.VERBOSE) {
+        log(`  📊 Seller scoring (top ${Math.min(10, scoredSellers.length)}):`, 'info');
+        scoredSellers.slice(0, 10).forEach((s, idx) => {
+            const d = s._scoreDetails;
+            log(`     ${idx + 1}. ${s.seller} | Score: ${s._score} (P:${d.price} D:${d.desc} C:${d.cutoff} R:${d.rating}) | ${formatRp(s.price)}`, 'info');
+        });
+    }
+    
+    // Ensure we have at least one 24h seller in top candidates (for B2)
+    const top = scoredSellers.slice(0, CONFIG.MAX_AI_CANDIDATES);
+    const has24h = top.some(s => s.start_cut_off === '00:00' && s.end_cut_off === '00:00');
+    
+    if (!has24h) {
+        // Find best 24h seller not in top
+        const best24h = scoredSellers
+            .slice(CONFIG.MAX_AI_CANDIDATES)
+            .find(s => s.start_cut_off === '00:00' && s.end_cut_off === '00:00');
+        
+        if (best24h) {
+            // Replace lowest scored candidate with 24h seller
+            top[top.length - 1] = best24h;
+            log(`  ✅ Added 24h seller to candidates: ${best24h.seller}`, 'info');
         }
     }
     
-    // Return at least actualMin candidates (or all if less), but cap at MAX_AI_CANDIDATES
-    return candidates.slice(0, Math.max(actualMin, Math.min(candidates.length, CONFIG.MAX_AI_CANDIDATES)));
+    // Return top candidates (capped at MAX_AI_CANDIDATES)
+    const maxCandidates = Math.min(CONFIG.MAX_AI_CANDIDATES, 10); // Hard cap at 10
+    const result = top.slice(0, Math.max(actualMin, Math.min(top.length, maxCandidates)));
+    
+    log(`  📤 Sending ${result.length} pre-scored candidates to AI (from ${sellers.length} total)`, 'info');
+    
+    return result;
 };
 
 // =============================================================================
 // AI SELLER SELECTION
 // =============================================================================
 
-const SYSTEM_PROMPT_SELLER = `Kamu adalah asisten pemilihan seller PPOB. HANYA BALAS DENGAN JSON.
+const SYSTEM_PROMPT_SELLER = `Kamu adalah analis deskripsi seller PPOB. HANYA BALAS DENGAN JSON.
 
-TUGAS: Pilih seller sesuai JUMLAH yang diminta.
+=== KONTEKS ===
+Data sudah di-filter dan di-sort berdasarkan:
+- Harga termurah
+- Deskripsi panjang & berkualitas
+- Operasional 24 jam
+- Rating bagus
 
-=== STEP PEMILIHAN ===
+Kandidat dikirim SUDAH TERURUT dari skor tertinggi.
 
-STEP 1 - BLACKLIST (filter dulu, JANGAN pilih seller dengan ciri ini):
-- Deskripsi mengandung: "testing", "sedang testing", "maintenance", "sedang testing bersama admin"
-- Deskripsi mengandung: "pulsa transfer", "paket transfer" (bukan stok sendiri)
-- Deskripsi terlalu singkat atau hanya nama produk (contoh: "telkomsel 2000")
-- Deskripsi kosong atau hanya "-"
-- Prioritaskan Multi = True, jika tidak ada seller dengan Multi = False boleh dimasukkan
-- Faktur Wajib ${CONFIG.REQUIRE_FP ? 'true' : 'false'}
+=== TUGAS SATU-SATUNYA ===
+Analisis DESKRIPSI setiap seller untuk menentukan:
+1. Stabilitas (stabil, lancar, jarang gangguan)
+2. Speed (detikan, instant, cepat)
+3. Zona/Coverage (nasional, all zone, atau zona terbatas)
+4. Kualitas stok (stok sendiri, NGRS, chip sendiri)
 
-STEP 2 - PILIH SELLER (dari yang lolos blacklist):
+=== PEMILIHAN ===
 
 MAIN (Seller Utama):
-- WAJIB: Harga TERMURAH dari data yang diberikan
-- WAJIB: Deskripsi menyebut zona/coverage (nasional/all zone) ATAU speed ATAU stok
+- Kandidat #1 atau #2 (sudah termurah)
+- Pilih yang deskripsi paling bagus (Nasional/Speed/Stok)
+- HINDARI: deskripsi "testing", "maintenance", "transfer", zona terbatas tanpa failover
 
 ${CONFIG.BACKUP1_SUFFIX} (Backup Stabilitas):
-- WAJIB: ID BERBEDA dari MAIN
-- Prioritas: Jika bisa, cari deskripsi yang menyebut stabil atau tidak ada gangguan, jika tidak ada, tidak apa apa
-- Harga: Boleh lebih mahal dari MAIN (wajar untuk kualitas), tapi kalau bisa, sedikit lebih mahal saja dari harga MAIN
+- ID BERBEDA dari MAIN
+- Prioritas: Deskripsi menyebut "stabil", "lancar", "jarang gangguan"
+- Boleh dari kandidat #2-#5
 
 ${CONFIG.BACKUP2_SUFFIX} (Backup 24 Jam):
-- WAJIB: h24=1 (24 jam operasional), jika tidak ada, cari yang mendekati cut off tercepat
-- WAJIB: Cek c= berapa, jika h24=1 dan C bukan 00:00 - 00:00, maka ad kesalahan, cari yang c=00:00 - 00:00, itu adalah 24 jam operasional yang asli, karena kadang ada kesalahan
-- WAJIB: ID BERBEDA dari MAIN dan ${CONFIG.BACKUP1_SUFFIX}
-- Prioritas: deskripsi terbaik > harga termurah
-- Jika tidak ada seller yang menurutmu masuk kriteria, masukkan seller lain yang menurutmu bisa stabil seperti MAIN dan ${CONFIG.BACKUP1_SUFFIX}
+- ID BERBEDA dari MAIN dan ${CONFIG.BACKUP1_SUFFIX}
+- WAJIB: h24=1 (cutoff 00:00 - 00:00)
+- Jika semua h24=0, pilih yang cutoff paling lama
+- Prioritas: Deskripsi bagus > harga murah
 
-=== KRITERIA DESKRIPSI BAGUS ===
-
-Zona (salah satu):
-- "Nasional", "All Zone", "Lintas Nasional", "Seluruh Indonesia"
-- Tidak menyebut zona = netral (OK)
-- "Zonasi" dengan "gagal alihkan/failover" = OK (ada backup)
-
-Speed (salah satu):
-- "Detikan", "1-10 detik", "Instant", "Proses Cepat"
-
-Stok (salah satu):
-- "Stok Sendiri", "Full NGRS", "Stok Terjamin", "Chip Sendiri"
-
-=== ZONA TERBATAS (HINDARI jika ada alternatif) ===
-- "Zona Jawa only", "Zona 1 saja", "Khusus Sumatera", "Jawa Bali only"
-- TAPI BOLEH jika:
-  • Ada "gagal alihkan", "failover", atau "alihkan otomatis"
-  • Ada "NASIONAL" atau "All Zone" di deskripsi (override zona terbatas)
+=== BLACKLIST DESKRIPSI (JANGAN PILIH) ===
+- "testing", "sedang testing", "maintenance"
+- "pulsa transfer", "paket transfer"
+- Deskripsi kosong, "-", atau hanya nama produk
+- Faktur Wajib: ${CONFIG.REQUIRE_FP ? 'Ya (faktur=true)' : 'Tidak (faktur=false)'}
 
 === FORMAT RESPONSE ===
 
 {
   "sellers": [
-    {"type": "MAIN", "id": "xxx", "name": "XXX", "price": 1000},
-    {"type": "${CONFIG.BACKUP1_SUFFIX}", "id": "yyy", "name": "YYY", "price": 1100},
-    {"type": "${CONFIG.BACKUP2_SUFFIX}", "id": "zzz", "name": "ZZZ", "price": 1200}
+    {"type": "MAIN", "id": "xxx", "name": "XXX", "price": 1000, "reason": "nasional, stok sendiri"},
+    {"type": "${CONFIG.BACKUP1_SUFFIX}", "id": "yyy", "name": "YYY", "price": 1100, "reason": "stabil, detikan"},
+    {"type": "${CONFIG.BACKUP2_SUFFIX}", "id": "zzz", "name": "ZZZ", "price": 1200, "reason": "24jam, lancar"}
   ],
-  "reasoning": "penjelasan singkat pemilihan"
+  "reasoning": "penjelasan singkat"
 }
 
-PENTING: Sertakan "id" seller untuk akurasi!`;
+PENTING: 
+- Sertakan "id" seller untuk akurasi
+- Kandidat sudah diurutkan, MAIN idealnya dari #1-#3 (termurah dengan deskripsi OK)
+- Jangan halusinasi - pilih HANYA dari kandidat yang diberikan`;
 
 const callGPTAPI = async (userMessage, rateLimitRetry = 0) => {
     STATE.stats.aiCalls++;
@@ -678,79 +793,90 @@ const getAISellers = async (sellers, productName, usedSellers = [], excludeSelle
         throw new Error('No sellers available after excluding sellers');
     }
     
-    const sellerData = availableSellers.map(s => ({
+    // Format seller data with ranking (already sorted by score from prepareSellersForAI)
+    const sellerData = availableSellers.map((s, idx) => ({
+        rank: idx + 1, // Position after scoring (1 = best score)
         id: s.id,
         n: s.seller,
         p: s.price,
-        r: s.reviewAvg || 0,
-        c: `${s.start_cut_off} - ${s.end_cut_off}`,
+        score: s._score || 0, // Pre-calculated score
         h24: (s.start_cut_off === '00:00' && s.end_cut_off === '00:00') ? 1 : 0,
-        d: (s.deskripsi || '-').substring(0, 100),
-        faktur: s.faktur || false, // Include faktur info
-        multi: s.multi || false, // Include multi info
+        c: `${s.start_cut_off}-${s.end_cut_off}`,
+        d: (s.deskripsi || '-').substring(0, 150), // Slightly longer for better analysis
+        faktur: s.faktur || false,
+        multi: s.multi || false,
     }));
     
-    let userMessage = `PRODUCT: ${productName}
-NEED: ${neededSellers} seller(s)
+    // Build user message with clear context
+    let userMessage = `PRODUK: ${productName}
+BUTUH: ${neededSellers} seller
 
-SELLERS (id, n=name, p=price, r=rating, c=cutoff, h24=24jam, d=desc, faktur=true/false, multi=true/false):
-${JSON.stringify(sellerData)}`;
+KANDIDAT (sudah diurutkan dari skor tertinggi - analisis deskripsi saja):
+rank=posisi, id, n=nama, p=harga, score=skor, h24=24jam, c=cutoff, d=deskripsi, faktur, multi
+
+${sellerData.map(s => 
+    `#${s.rank} | id:${s.id} | ${s.n} | Rp${s.p} | score:${s.score} | h24:${s.h24} | c:${s.c} | faktur:${s.faktur} | multi:${s.multi}
+   desc: "${s.d}"`
+).join('\n\n')}`;
 
     // Add exclusion info if any
     if (excludeSellerIds.length > 0) {
-        userMessage += `\n\nEXCLUDED SELLERS (JANGAN PILIH - bermasalah): ${excludeSellerIds.join(', ')}`;
-        userMessage += `\nPilih seller LAIN yang tidak bermasalah!`;
+        userMessage += `\n\n⛔ EXCLUDED (jangan pilih): ${excludeSellerIds.join(', ')}`;
     }
 
+    // Add selection guidance based on needed sellers
     if (neededSellers === 1) {
-        userMessage += `\n\nChoose 1 seller (MAIN only) with ID.`;
+        userMessage += `\n\n→ Pilih 1 seller (MAIN) - idealnya #1 atau #2 jika deskripsi OK`;
     } else if (neededSellers === 2) {
-        userMessage += `\n\nChoose 2 DIFFERENT sellers (MAIN and ${CONFIG.BACKUP1_SUFFIX}) with IDs.`;
+        userMessage += `\n\n→ Pilih 2 seller BERBEDA (MAIN + ${CONFIG.BACKUP1_SUFFIX})`;
     } else {
-        userMessage += `\n\nChoose 3 DIFFERENT sellers (MAIN, ${CONFIG.BACKUP1_SUFFIX}, and ${CONFIG.BACKUP2_SUFFIX}) with IDs.`;
+        userMessage += `\n\n→ Pilih 3 seller BERBEDA (MAIN + ${CONFIG.BACKUP1_SUFFIX} + ${CONFIG.BACKUP2_SUFFIX})`;
+        userMessage += `\n→ ${CONFIG.BACKUP2_SUFFIX} WAJIB h24=1 jika ada, atau cutoff terlama`;
     }
 
-    log('  Asking AI for seller selection...', 'ai');
-    log(`  📊 Sending ${sellerData.length} candidates to AI`, 'info');
+    log('  🤖 Asking AI to analyze descriptions...', 'ai');
+    log(`  📊 Sending ${sellerData.length} pre-scored candidates to AI`, 'info');
     if (excludeSellerIds.length > 0) {
-        // excludeSellerIds can contain problematic sellers (KTP error) or just excluded sellers (duplicate error)
         log(`  ⚠️ Excluding ${excludeSellerIds.length} seller(s)`, 'warning');
     }
     
     const result = await retry(() => callGPTAPI(userMessage));
 
     if (!result.sellers || result.sellers.length === 0) {
-        // Fallback: jika seller sedikit (<=5), auto-select tanpa AI
-        if (availableSellers.length <= 5) {
-            log(`  ⚠️ AI returned no sellers, but only ${availableSellers.length} seller(s) available. Auto-selecting...`, 'warning');
-            
-            // Sort by price (cheapest first), then by rating (highest first)
-            const sorted = [...availableSellers].sort((a, b) => {
-                const priceDiff = (a.price || 0) - (b.price || 0);
-                if (priceDiff !== 0) return priceDiff;
-                return (b.reviewAvg || 0) - (a.reviewAvg || 0);
-            });
-            
-            // Take needed sellers
-            const selected = sorted.slice(0, neededSellers);
-            
-            // Assign types: MAIN, B1, B2
-            const typeMap = ['MAIN', CONFIG.BACKUP1_SUFFIX, CONFIG.BACKUP2_SUFFIX];
-            const autoSelected = selected.map((seller, idx) => ({
-                type: typeMap[idx] || 'MAIN',
-                ...seller
-            }));
-            
-            log(`  ✅ Auto-selected ${autoSelected.length} seller(s) (fallback):`, 'success');
-            autoSelected.forEach((s, idx) => {
-                log(`     ${idx + 1}. ${s.type}: ${s.seller || s.name} @ ${formatRp(s.price || 0)}`, 'info');
-            });
-            
-            log(`  📋 Final sellers: ${autoSelected.map(s => `${s.type}=${s.seller || s.name}@${formatRp(s.price)}`).join(', ')}`, 'ai');
-            return autoSelected;
+        // Fallback: auto-select based on pre-calculated scores
+        log(`  ⚠️ AI returned no sellers. Auto-selecting based on pre-scores...`, 'warning');
+        
+        // Sellers already sorted by score, just assign types
+        const selected = availableSellers.slice(0, neededSellers);
+        
+        // For B2, try to find 24h seller if not already in selection
+        if (neededSellers >= 3) {
+            const has24h = selected.some(s => s.start_cut_off === '00:00' && s.end_cut_off === '00:00');
+            if (!has24h) {
+                const seller24h = availableSellers.find(s => 
+                    s.start_cut_off === '00:00' && s.end_cut_off === '00:00' && 
+                    !selected.includes(s)
+                );
+                if (seller24h && selected.length >= 3) {
+                    selected[2] = seller24h; // Replace B2 with 24h seller
+                }
+            }
         }
         
-        throw new Error('AI returned no sellers');
+        const typeMap = ['MAIN', CONFIG.BACKUP1_SUFFIX, CONFIG.BACKUP2_SUFFIX];
+        const autoSelected = selected.map((seller, idx) => ({
+            type: typeMap[idx] || 'MAIN',
+            ...seller,
+            reason: 'auto-selected by score'
+        }));
+        
+        log(`  ✅ Auto-selected ${autoSelected.length} seller(s) based on scores:`, 'success');
+        autoSelected.forEach((s, idx) => {
+            log(`     ${idx + 1}. ${s.type}: ${s.seller || s.name} @ ${formatRp(s.price || 0)} (score: ${s._score || 0})`, 'info');
+        });
+        
+        log(`  📋 Final sellers: ${autoSelected.map(s => `${s.type}=${s.seller || s.name}@${formatRp(s.price)}`).join(', ')}`, 'ai');
+        return autoSelected;
     }
 
     // Log AI reasoning if available
@@ -760,7 +886,8 @@ ${JSON.stringify(sellerData)}`;
 
     log(`  ✅ AI selected ${result.sellers.length} seller(s):`, 'success');
     result.sellers.forEach((s, idx) => {
-        log(`     ${idx + 1}. ${s.type}: ${s.name || s.id} @ ${formatRp(s.price || 0)}`, 'info');
+        const reason = s.reason ? ` (${s.reason})` : '';
+        log(`     ${idx + 1}. ${s.type}: ${s.name || s.id} @ ${formatRp(s.price || 0)}${reason}`, 'info');
     });
 
     const enrichedSellers = result.sellers.map(aiSeller => {
