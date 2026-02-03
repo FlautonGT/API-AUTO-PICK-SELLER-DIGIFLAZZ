@@ -708,61 +708,59 @@ const prepareSellersForAI = (sellers, minCandidates = 3) => {
 
 const SYSTEM_PROMPT_SELLER = `Kamu adalah analis deskripsi seller PPOB. HANYA BALAS DENGAN JSON.
 
-=== KONTEKS ===
-Data sudah di-filter dan di-sort berdasarkan:
-- Harga termurah
-- Deskripsi panjang & berkualitas
-- Operasional 24 jam
-- Rating bagus
+=== ATURAN WAJIB (TIDAK BOLEH DILANGGAR) ===
 
-Kandidat dikirim SUDAH TERURUT dari skor tertinggi.
+1. MAIN WAJIB SELLER DENGAN HARGA TERMURAH dari kandidat yang diberikan
+   - Cek field "p" (price), pilih yang PALING KECIL
+   - Jika deskripsi termurah buruk, baru boleh pilih termurah ke-2
 
-=== TUGAS SATU-SATUNYA ===
-Analisis DESKRIPSI setiap seller untuk menentukan:
-1. Stabilitas (stabil, lancar, jarang gangguan)
-2. Speed (detikan, instant, cepat)
-3. Zona/Coverage (nasional, all zone, atau zona terbatas)
-4. Kualitas stok (stok sendiri, NGRS, chip sendiri)
+2. KETIGA SELLER WAJIB MEMILIKI ID BERBEDA
+   - MAIN, ${CONFIG.BACKUP1_SUFFIX}, ${CONFIG.BACKUP2_SUFFIX} TIDAK BOLEH sama ID-nya
+   - Jika kamu pilih ID yang sama, itu SALAH!
 
-=== PEMILIHAN ===
+3. WAJIB KEMBALIKAN 3 SELLER jika diminta 3
+   - Jangan return hanya 2 jika ada 3+ kandidat berbeda
 
-MAIN (Seller Utama):
-- Kandidat #1 atau #2 (sudah termurah)
-- Pilih yang deskripsi paling bagus (Nasional/Speed/Stok)
-- HINDARI: deskripsi "testing", "maintenance", "transfer", zona terbatas tanpa failover
+=== TUGAS ===
+Analisis DESKRIPSI untuk menentukan kualitas:
+- Stabilitas (stabil, lancar, jarang gangguan)
+- Speed (detikan, instant, cepat)
+- Zona (nasional, all zone)
+- Stok (stok sendiri, NGRS, chip sendiri)
 
-${CONFIG.BACKUP1_SUFFIX} (Backup Stabilitas):
+=== KRITERIA PEMILIHAN ===
+
+MAIN:
+- WAJIB harga TERMURAH (p paling kecil)
+- Deskripsi tidak mengandung "testing", "maintenance", "transfer"
+
+${CONFIG.BACKUP1_SUFFIX}:
 - ID BERBEDA dari MAIN
-- Prioritas: Deskripsi menyebut "stabil", "lancar", "jarang gangguan"
-- Boleh dari kandidat #2-#5
+- Prioritas: deskripsi menyebut "stabil", "lancar"
 
-${CONFIG.BACKUP2_SUFFIX} (Backup 24 Jam):
+${CONFIG.BACKUP2_SUFFIX}:
 - ID BERBEDA dari MAIN dan ${CONFIG.BACKUP1_SUFFIX}
-- WAJIB: h24=1 (cutoff 00:00 - 00:00)
-- Jika semua h24=0, pilih yang cutoff paling lama
-- Prioritas: Deskripsi bagus > harga murah
+- WAJIB h24=1 jika ada, jika tidak ada pilih cutoff terlama
 
-=== BLACKLIST DESKRIPSI (JANGAN PILIH) ===
-- "testing", "sedang testing", "maintenance"
-- "pulsa transfer", "paket transfer"
-- Deskripsi kosong, "-", atau hanya nama produk
-- Faktur Wajib: ${CONFIG.REQUIRE_FP ? 'Ya (faktur=true)' : 'Tidak (faktur=false)'}
+=== BLACKLIST ===
+- "testing", "maintenance", "pulsa transfer"
+- Deskripsi kosong atau "-"
+- Faktur: ${CONFIG.REQUIRE_FP ? 'Wajib faktur=true' : 'Pilih faktur=false'}
 
 === FORMAT RESPONSE ===
-
 {
   "sellers": [
-    {"type": "MAIN", "id": "xxx", "name": "XXX", "price": 1000, "reason": "nasional, stok sendiri"},
-    {"type": "${CONFIG.BACKUP1_SUFFIX}", "id": "yyy", "name": "YYY", "price": 1100, "reason": "stabil, detikan"},
-    {"type": "${CONFIG.BACKUP2_SUFFIX}", "id": "zzz", "name": "ZZZ", "price": 1200, "reason": "24jam, lancar"}
+    {"type": "MAIN", "id": "ID_UNIK_1", "name": "XXX", "price": 1000, "reason": "termurah, nasional"},
+    {"type": "${CONFIG.BACKUP1_SUFFIX}", "id": "ID_UNIK_2", "name": "YYY", "price": 1100, "reason": "stabil"},
+    {"type": "${CONFIG.BACKUP2_SUFFIX}", "id": "ID_UNIK_3", "name": "ZZZ", "price": 1200, "reason": "24jam"}
   ],
-  "reasoning": "penjelasan singkat"
+  "reasoning": "penjelasan"
 }
 
-PENTING: 
-- Sertakan "id" seller untuk akurasi
-- Kandidat sudah diurutkan, MAIN idealnya dari #1-#3 (termurah dengan deskripsi OK)
-- Jangan halusinasi - pilih HANYA dari kandidat yang diberikan`;
+⚠️ PERINGATAN:
+- ID_UNIK_1, ID_UNIK_2, ID_UNIK_3 HARUS BERBEDA!
+- MAIN = harga termurah
+- Pilih HANYA dari kandidat yang diberikan`;
 
 const callGPTAPI = async (userMessage, rateLimitRetry = 0) => {
     STATE.stats.aiCalls++;

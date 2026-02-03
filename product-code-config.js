@@ -1149,22 +1149,25 @@ export const TYPE_PREFIX = {
  */
 export const getCategoryPrefix = (category) => {
     if (!category) return '';
-    const categoryUpper = category.toUpperCase().trim();
+    const categoryLower = category.toLowerCase().trim();
     
-    // Exact match first
-    if (CATEGORY_PREFIX[categoryUpper]) {
-        return CATEGORY_PREFIX[categoryUpper];
-    }
-    
-    // Partial match
+    // Exact match first (case-insensitive)
     for (const [key, prefix] of Object.entries(CATEGORY_PREFIX)) {
-        if (categoryUpper.includes(key) || key.includes(categoryUpper)) {
+        if (key.toLowerCase() === categoryLower) {
             return prefix;
         }
     }
     
-    // Fallback: first 2-3 chars
-    return categoryUpper.substring(0, 2);
+    // Partial match (case-insensitive)
+    for (const [key, prefix] of Object.entries(CATEGORY_PREFIX)) {
+        const keyLower = key.toLowerCase();
+        if (categoryLower.includes(keyLower) || keyLower.includes(categoryLower)) {
+            return prefix;
+        }
+    }
+    
+    // Fallback: first 2 chars
+    return category.toUpperCase().substring(0, 2);
 };
 
 /**
@@ -1172,22 +1175,25 @@ export const getCategoryPrefix = (category) => {
  */
 export const getBrandPrefix = (brand) => {
     if (!brand) return '';
-    const brandUpper = brand.toUpperCase().trim();
+    const brandLower = brand.toLowerCase().trim();
     
-    // Exact match first
-    if (BRAND_PREFIX[brandUpper] !== undefined) {
-        return BRAND_PREFIX[brandUpper];
-    }
-    
-    // Partial match
+    // Exact match first (case-insensitive)
     for (const [key, prefix] of Object.entries(BRAND_PREFIX)) {
-        if (brandUpper.includes(key) || key.includes(brandUpper)) {
+        if (key.toLowerCase() === brandLower) {
             return prefix;
         }
     }
     
-    // Fallback: first 2-3 chars
-    return brandUpper.substring(0, 3);
+    // Partial match (case-insensitive)
+    for (const [key, prefix] of Object.entries(BRAND_PREFIX)) {
+        const keyLower = key.toLowerCase();
+        if (brandLower.includes(keyLower) || keyLower.includes(brandLower)) {
+            return prefix;
+        }
+    }
+    
+    // Fallback: first 3 chars uppercase
+    return brand.toUpperCase().substring(0, 3);
 };
 
 /**
@@ -1195,23 +1201,26 @@ export const getBrandPrefix = (brand) => {
  */
 export const getTypePrefix = (type) => {
     if (!type) return '';
-    const typeUpper = type.toUpperCase().trim();
+    const typeLower = type.toLowerCase().trim();
     
-    // Exact match first
-    if (TYPE_PREFIX[typeUpper] !== undefined) {
-        return TYPE_PREFIX[typeUpper];
+    // Check for Umum/Reguler first - these should return empty
+    if (['umum', 'reguler', 'regular', 'basic', '-', ''].includes(typeLower)) {
+        return '';
     }
     
-    // Partial match
+    // Exact match first (case-insensitive)
     for (const [key, prefix] of Object.entries(TYPE_PREFIX)) {
-        if (typeUpper.includes(key) || key.includes(typeUpper)) {
+        if (key.toLowerCase() === typeLower) {
             return prefix;
         }
     }
     
-    // Umum/reguler types return empty
-    if (['UMUM', 'REGULER', 'REGULAR', '-', ''].includes(typeUpper)) {
-        return '';
+    // Partial match (case-insensitive)
+    for (const [key, prefix] of Object.entries(TYPE_PREFIX)) {
+        const keyLower = key.toLowerCase();
+        if (typeLower.includes(keyLower) || keyLower.includes(typeLower)) {
+            return prefix;
+        }
     }
     
     return '';

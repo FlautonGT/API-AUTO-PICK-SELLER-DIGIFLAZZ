@@ -172,16 +172,16 @@ node index.js --help
 npm install -g pm2
 
 # Jalankan dengan PM2
-pm2 start index.js --name "digiflazz-picker"
+pm2 start index.js --name "digiflazz"
 
 # Lihat logs
-pm2 logs digiflazz-picker
+pm2 logs digiflazz
 
 # Stop
-pm2 stop digiflazz-picker
+pm2 stop digiflazz
 
 # Restart
-pm2 restart digiflazz-picker
+pm2 restart digiflazz
 ```
 
 ## Konfigurasi
@@ -325,7 +325,7 @@ node index.js --test
 
 # Run dengan PM2
 npm install -g pm2
-pm2 start index.js --name "digiflazz-picker"
+pm2 start index.js --name "digiflazz"
 pm2 save
 pm2 startup
 ```
