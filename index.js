@@ -1023,10 +1023,19 @@ ${sellerData.map(s =>
         log(`  ⚠️ AI returned no sellers. Auto-selecting based on pre-scores...`, 'warning');
         
         // Sellers already sorted by score, just assign types
-        const selected = availableSellers.slice(0, neededSellers);
+        // Ensure we select unique sellers (different IDs)
+        const selected = [];
+        const usedIds = new Set();
+        for (const seller of availableSellers) {
+            if (selected.length >= neededSellers) break;
+            if (!usedIds.has(seller.id)) {
+                selected.push(seller);
+                usedIds.add(seller.id);
+            }
+        }
         
         // For B2, try to find 24h seller if not already in selection
-        if (neededSellers >= 3) {
+        if (neededSellers >= 3 && selected.length >= 3) {
             const has24h = selected.some(s => s.start_cut_off === '00:00' && s.end_cut_off === '00:00');
             if (!has24h) {
                 const seller24h = availableSellers.find(s => 
@@ -1108,11 +1117,14 @@ ${sellerData.map(s =>
     const uniqueIds = new Set(sellerIds);
     if (sellerIds.length !== uniqueIds.size) {
         log(`  ⚠️ WARNING: AI selected duplicate seller IDs! IDs: ${sellerIds.join(', ')}`, 'warning');
+        
         // Remove duplicates by keeping only the first occurrence of each ID
         const seenIds = new Set();
+        const duplicateTypes = []; // Track which types had duplicates removed
         const deduplicatedSellers = enrichedSellers.filter(s => {
             if (!s.id || seenIds.has(s.id)) {
-                log(`  ❌ Removing duplicate seller: ${s.seller || s.name} (ID: ${s.id})`, 'warning');
+                log(`  ❌ Removing duplicate seller: ${s.seller || s.name} (ID: ${s.id}) type: ${s.type}`, 'warning');
+                duplicateTypes.push(s.type);
                 return false;
             }
             seenIds.add(s.id);
@@ -1121,6 +1133,51 @@ ${sellerData.map(s =>
         
         if (deduplicatedSellers.length === 0) {
             throw new Error('All sellers were duplicates after deduplication');
+        }
+        
+        // If we need more sellers, find replacements from available candidates
+        const neededMore = neededSellers - deduplicatedSellers.length;
+        if (neededMore > 0 && availableSellers.length > deduplicatedSellers.length) {
+            log(`  🔄 Need ${neededMore} more seller(s) to replace duplicates...`, 'info');
+            
+            // Get IDs already selected
+            const selectedIds = new Set(deduplicatedSellers.map(s => s.id));
+            
+            // Find replacement candidates (not yet selected)
+            const replacementCandidates = availableSellers.filter(s => !selectedIds.has(s.id));
+            
+            // Determine which types need replacement
+            const typesNeeded = duplicateTypes.slice(0, neededMore);
+            const typeMap = ['MAIN', CONFIG.BACKUP1_SUFFIX, CONFIG.BACKUP2_SUFFIX];
+            
+            for (let i = 0; i < neededMore && i < replacementCandidates.length; i++) {
+                const replacement = replacementCandidates[i];
+                const typeToAssign = typesNeeded[i] || typeMap[deduplicatedSellers.length + i] || 'MAIN';
+                
+                // For B2, prefer 24h seller if available
+                let finalReplacement = replacement;
+                if (typeToAssign === CONFIG.BACKUP2_SUFFIX) {
+                    const seller24h = replacementCandidates.find(s => 
+                        s.start_cut_off === '00:00' && s.end_cut_off === '00:00' && 
+                        !selectedIds.has(s.id)
+                    );
+                    if (seller24h) {
+                        finalReplacement = seller24h;
+                    }
+                }
+                
+                const enrichedReplacement = { type: typeToAssign, ...finalReplacement };
+                deduplicatedSellers.push(enrichedReplacement);
+                selectedIds.add(finalReplacement.id);
+                
+                log(`  ✅ Added replacement for ${typeToAssign}: ${finalReplacement.seller || finalReplacement.name} @ ${formatRp(finalReplacement.price)}`, 'success');
+            }
+            
+            // Sort by type order (MAIN, B1, B2)
+            deduplicatedSellers.sort((a, b) => {
+                const order = { 'MAIN': 0, [CONFIG.BACKUP1_SUFFIX]: 1, [CONFIG.BACKUP2_SUFFIX]: 2 };
+                return (order[a.type] ?? 99) - (order[b.type] ?? 99);
+            });
         }
         
         log(`  📋 Final sellers (after deduplication): ${deduplicatedSellers.map(s => `${s.type}=${s.seller || s.name}@${formatRp(s.price)}`).join(', ')}`, 'ai');
@@ -2168,7 +2225,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
         // If row found with matching code, use it (but check if already used)
         if (targetRow && !usedRowIds.has(targetRow.id)) {
             usedRowIds.add(targetRow.id);
-            const finalCodeForMapping = targetRow.code.trim();
+            const finalCodeForMapping = (targetRow.code && targetRow.code.trim()) ? targetRow.code.trim() : code;
             sellerToRowMap.set(seller.type, { row: targetRow, seller, code: finalCodeForMapping });
             log(`     ✅ Mapped ${seller.type} to row ${targetRow.id} (matched code: ${code})`, 'info');
             continue;
@@ -2748,7 +2805,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
                         
                         if (targetRow && !newUsedRowIds.has(targetRow.id)) {
                             newUsedRowIds.add(targetRow.id);
-                            const finalCodeForMapping = targetRow.code.trim();
+                            const finalCodeForMapping = (targetRow.code && targetRow.code.trim()) ? targetRow.code.trim() : code;
                             newSellerToRowMap.set(seller.type, { row: targetRow, seller, code: finalCodeForMapping });
                             continue;
                         }
