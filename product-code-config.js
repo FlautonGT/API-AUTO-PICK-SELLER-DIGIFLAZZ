@@ -1260,8 +1260,24 @@ export const extractNominal = (productName, category) => {
         return `${size}${unit}`;
     }
     
-    // === CASE 3: Pulsa/E-Money dengan nominal ribuan ===
-    // Pattern: 10.000, 25000, 50,000
+    // === CASE 3a: Pulsa/E-Money dengan nominal jutaan ===
+    // Pattern: 1.000.000, 2000000, 1,000,000 (juta)
+    const millionMatch = nameUpper.match(/(\d+)[.,]?0{3}[.,]?0{3}(?:\b|[^\d])/);
+    if (millionMatch) {
+        const millions = parseInt(millionMatch[1]);
+        // Return as "XM" for millions (1M, 2M, etc) or "XJTA" for clarity
+        return `${millions}JT`; // 1JT, 2JT for 1 juta, 2 juta
+    }
+    
+    // === CASE 3b: Pulsa/E-Money dengan nominal ratusan ribu ===
+    // Pattern: 100.000, 200000, 500,000 (ratusan ribu)
+    const hundredThousandMatch = nameUpper.match(/(\d{2,3})[.,]?0{3}(?:\b|[^\d])/);
+    if (hundredThousandMatch) {
+        return hundredThousandMatch[1]; // Return 100, 200, 500
+    }
+    
+    // === CASE 3c: Pulsa/E-Money dengan nominal puluhan ribu ===
+    // Pattern: 10.000, 25000, 50,000 (puluhan ribu)
     const thousandMatch = nameUpper.match(/(\d+)[.,]?0{3}(?:\b|[^\d])/);
     if (thousandMatch) {
         return thousandMatch[1]; // Return number without thousands
