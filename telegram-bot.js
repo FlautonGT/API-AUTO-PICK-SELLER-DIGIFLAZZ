@@ -32,6 +32,16 @@ export class TelegramProductCodeBot {
                 const code = msg.text.trim().toUpperCase();
                 await this.confirmProductCode(code, pending);
             }
+            // Handle XSRF_TOKEN reply
+            else if (pending && pending.type === 'xsrf_token') {
+                const token = msg.text.trim();
+                await this.handleXSRFTokenReply(token, replyToId, pending);
+            }
+            // Handle COOKIE reply
+            else if (pending && pending.type === 'cookie') {
+                const cookie = msg.text.trim();
+                await this.handleCookieReply(cookie, replyToId, pending);
+            }
         });
 
         this.bot.on('callback_query', async (query) => {
@@ -60,6 +70,10 @@ export class TelegramProductCodeBot {
                 const action = parts[1]; // 'yes' atau 'no'
                 const code = parts.slice(2).join('_'); // code bisa mengandung underscore
                 await this.handleAutoCodeConfirmation(action, code, query.message.message_id);
+            }
+            // Handle quota continue
+            else if (data === 'quota_continue') {
+                await this.handleQuotaContinue(query.message.message_id);
             }
         });
     }
@@ -552,32 +566,217 @@ Script akan otomatis melanjutkan setelah sleep.
     }
 
     /**
-     * Send 401 unauthorized notification
+     * Send OpenAI quota exhausted notification with continue button
      */
-    async send401Notification() {
+    async sendQuotaExhaustedNotification() {
         const message = `
-🔐 *Token Kadaluarsa (401 Unauthorized)*
+🚨 *QUOTA OPENAI TELAH HABIS*
 
-Token Digiflazz sudah tidak valid.
+❌ Script dihentikan sementara karena quota OpenAI habis.
 
-📝 *Action Required:*
-1. Buka https://member.digiflazz.com/buyer-area/product
-2. Tekan F12 > Network
-3. Refresh halaman
-4. Copy XSRF_TOKEN dan COOKIE baru
-5. Update file .env
-6. Restart script
+📝 *Langkah yang perlu dilakukan:*
+1. Buka https://platform.openai.com/usage
+2. Periksa usage dan billing
+3. Top up / isi ulang quota
+4. Tekan tombol *Lanjutkan* di bawah
 
 ⏰ *Time:* ${new Date().toLocaleString('id-ID')}
 `;
 
         try {
-            await this.bot.sendMessage(this.chatId, message, {
-                parse_mode: 'Markdown'
+            const sent = await this.bot.sendMessage(this.chatId, message, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            { text: '▶️ Lanjutkan', callback_data: 'quota_continue' }
+                        ]
+                    ]
+                }
+            });
+
+            // Return a promise that resolves when user clicks continue
+            return new Promise((resolve) => {
+                this.pendingRequests.set(sent.message_id, {
+                    resolve,
+                    type: 'quota_continue'
+                });
             });
         } catch (err) {
-            console.error('Failed to send 401 notification:', err);
+            console.error('Failed to send quota exhausted notification:', err);
+            throw err;
         }
+    }
+
+    /**
+     * Handle quota continue callback
+     */
+    async handleQuotaContinue(messageId) {
+        const pending = Array.from(this.pendingRequests.entries()).find(
+            ([id, p]) => p.type === 'quota_continue'
+        );
+
+        if (!pending) return;
+
+        const [pendingMsgId, pendingData] = pending;
+
+        try {
+            await this.bot.editMessageText(
+                `✅ *Script Dilanjutkan*\n\n⏰ Dilanjutkan pada: ${new Date().toLocaleString('id-ID')}`,
+                {
+                    chat_id: this.chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown'
+                }
+            );
+        } catch (err) {
+            console.error('Failed to edit quota message:', err);
+        }
+
+        this.pendingRequests.delete(pendingMsgId);
+        pendingData.resolve(true);
+    }
+
+    /**
+     * Send 401 unauthorized notification and request new credentials via reply
+     * Returns a promise that resolves with { xsrfToken, cookie } when user provides both
+     */
+    async send401Notification() {
+        // Step 1: Request XSRF_TOKEN
+        const xsrfMessage = `
+🔐 *Token Kadaluarsa (401 Unauthorized)*
+
+Token Digiflazz sudah tidak valid.
+
+📝 *Langkah 1/2: XSRF\\_TOKEN*
+
+1. Buka https://member.digiflazz.com/buyer-area/product
+2. Tekan F12 > Application > Cookies
+3. Copy nilai *XSRF-TOKEN*
+4. *Reply pesan ini* dengan XSRF\\_TOKEN
+
+⏰ *Time:* ${new Date().toLocaleString('id-ID')}
+`;
+
+        try {
+            const xsrfSent = await this.bot.sendMessage(this.chatId, xsrfMessage, {
+                parse_mode: 'Markdown'
+            });
+
+            // Wait for XSRF_TOKEN reply
+            const xsrfToken = await new Promise((resolve) => {
+                this.pendingRequests.set(xsrfSent.message_id, {
+                    resolve,
+                    type: 'xsrf_token'
+                });
+            });
+
+            // Step 2: Request COOKIE
+            const cookieMessage = `
+✅ *XSRF\\_TOKEN diterima!*
+
+📝 *Langkah 2/2: COOKIE*
+
+1. Di F12 > Network, refresh halaman
+2. Klik request pertama (ke domain digiflazz)
+3. Di Headers > Request Headers, copy nilai *Cookie*
+4. *Reply pesan ini* dengan COOKIE
+
+💡 Cookie biasanya dimulai dengan \`XSRF-TOKEN=...; digiflazz_session=...\`
+`;
+
+            const cookieSent = await this.bot.sendMessage(this.chatId, cookieMessage, {
+                parse_mode: 'Markdown'
+            });
+
+            // Wait for COOKIE reply
+            const cookie = await new Promise((resolve) => {
+                this.pendingRequests.set(cookieSent.message_id, {
+                    resolve,
+                    type: 'cookie'
+                });
+            });
+
+            // Confirm credentials received
+            await this.bot.sendMessage(this.chatId, `
+✅ *Credentials Updated!*
+
+🔑 XSRF\\_TOKEN: \`${xsrfToken.substring(0, 20)}...\`
+🍪 COOKIE: \`${cookie.substring(0, 30)}...\`
+
+▶️ Script akan melanjutkan...
+
+⏰ *Time:* ${new Date().toLocaleString('id-ID')}
+`, {
+                parse_mode: 'Markdown'
+            });
+
+            return { xsrfToken, cookie };
+
+        } catch (err) {
+            console.error('Failed to request new credentials:', err);
+            throw err;
+        }
+    }
+
+    /**
+     * Handle XSRF_TOKEN reply
+     */
+    async handleXSRFTokenReply(token, messageId, pending) {
+        // Validate token (basic check)
+        if (!token || token.length < 10) {
+            await this.bot.sendMessage(this.chatId, '❌ Token tidak valid. Silakan coba lagi dengan reply pesan sebelumnya.', {
+                reply_to_message_id: messageId
+            });
+            return;
+        }
+
+        // Edit original message to show received
+        try {
+            await this.bot.editMessageText(
+                `✅ *XSRF\\_TOKEN diterima!*\n\n\`${token.substring(0, 20)}...\``,
+                {
+                    chat_id: this.chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown'
+                }
+            );
+        } catch (err) {
+            // Ignore edit errors
+        }
+
+        this.pendingRequests.delete(messageId);
+        pending.resolve(token);
+    }
+
+    /**
+     * Handle COOKIE reply
+     */
+    async handleCookieReply(cookie, messageId, pending) {
+        // Validate cookie (basic check)
+        if (!cookie || cookie.length < 20) {
+            await this.bot.sendMessage(this.chatId, '❌ Cookie tidak valid. Silakan coba lagi dengan reply pesan sebelumnya.', {
+                reply_to_message_id: messageId
+            });
+            return;
+        }
+
+        // Edit original message to show received
+        try {
+            await this.bot.editMessageText(
+                `✅ *COOKIE diterima!*\n\n\`${cookie.substring(0, 30)}...\``,
+                {
+                    chat_id: this.chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown'
+                }
+            );
+        } catch (err) {
+            // Ignore edit errors
+        }
+
+        this.pendingRequests.delete(messageId);
+        pending.resolve(cookie);
     }
 
     /**

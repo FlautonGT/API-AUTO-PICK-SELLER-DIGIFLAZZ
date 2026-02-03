@@ -235,9 +235,27 @@ const api = {
                 const text = await res.text();
                 const errorMsg = `HTTP ${res.status}: ${text.substring(0, 200)}`;
                 
-                // Send 401 notification to Telegram
+                // Handle 401 Unauthorized - request new credentials via Telegram
                 if (res.status === 401 && telegramBot) {
-                    await telegramBot.send401Notification();
+                    log(`🔐 Token kadaluarsa (401). Meminta credentials baru via Telegram...`, 'error');
+                    
+                    try {
+                        // Request new credentials via Telegram (interactive)
+                        const newCredentials = await telegramBot.send401Notification();
+                        
+                        if (newCredentials && newCredentials.xsrfToken && newCredentials.cookie) {
+                            // Update CONFIG with new credentials
+                            CONFIG.XSRF_TOKEN = newCredentials.xsrfToken;
+                            CONFIG.COOKIE = newCredentials.cookie;
+                            
+                            log(`✅ Credentials updated! Retrying request...`, 'success');
+                            
+                            // Retry the request with new credentials
+                            return await this.request(endpoint, options);
+                        }
+                    } catch (credError) {
+                        log(`❌ Failed to get new credentials: ${credError.message}`, 'error');
+                    }
                 }
                 
                 // Log request body for debugging (especially for 400 errors)
@@ -839,8 +857,32 @@ const callGPTAPI = async (userMessage, rateLimitRetry = 0) => {
         })
     });
 
-    // Handle rate limit (429) with exponential backoff
+    // Handle rate limit (429) - check for insufficient_quota first
     if (res.status === 429) {
+        // Try to parse error response to check for insufficient_quota
+        let errorBody;
+        try {
+            errorBody = await res.json();
+        } catch {
+            errorBody = null;
+        }
+        
+        // Check if it's quota exceeded (insufficient_quota)
+        if (errorBody?.error?.code === 'insufficient_quota' || errorBody?.error?.type === 'insufficient_quota') {
+            log(`🚨 OpenAI Quota Habis! Menunggu konfirmasi untuk melanjutkan...`, 'error');
+            
+            // Send Telegram notification and wait for user to confirm
+            if (telegramBot) {
+                await telegramBot.sendQuotaExhaustedNotification();
+                // Wait for user confirmation before continuing
+                log(`⏸️  Script dihentikan. Menunggu tombol "Lanjutkan" ditekan di Telegram...`, 'warning');
+            }
+            
+            const errorMsg = 'OpenAI quota exceeded. Silahkan isi ulang quota dan tekan tombol Lanjutkan di Telegram.';
+            throw new Error(errorMsg);
+        }
+        
+        // Regular rate limit - retry with exponential backoff
         if (rateLimitRetry >= CONFIG.MAX_RATE_LIMIT_RETRIES) {
             const errorMsg = `GPT API rate limit exceeded after ${rateLimitRetry} retries. Please check your OpenAI quota at https://platform.openai.com/usage`;
             
@@ -870,6 +912,20 @@ const callGPTAPI = async (userMessage, rateLimitRetry = 0) => {
 
     if (!res.ok) {
         const err = await res.text();
+        
+        // Check for insufficient_quota in other error formats
+        if (err.includes('insufficient_quota')) {
+            log(`🚨 OpenAI Quota Habis! Menunggu konfirmasi untuk melanjutkan...`, 'error');
+            
+            if (telegramBot) {
+                await telegramBot.sendQuotaExhaustedNotification();
+                log(`⏸️  Script dihentikan. Menunggu tombol "Lanjutkan" ditekan di Telegram...`, 'warning');
+            }
+            
+            const errorMsg = 'OpenAI quota exceeded. Silahkan isi ulang quota dan tekan tombol Lanjutkan di Telegram.';
+            throw new Error(errorMsg);
+        }
+        
         const errorMsg = `GPT API ${res.status}: ${err.substring(0, 200)}`;
         
         // Send Telegram notification for GPT API errors
