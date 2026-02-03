@@ -584,17 +584,35 @@ Token Digiflazz sudah tidak valid.
      * Send completion summary
      */
     async sendCompletionSummary(stats) {
+        // Calculate additional stats
+        const processedTotal = stats.success + stats.errors;
+        const skippedPercent = stats.total > 0 ? ((stats.skipped / stats.total) * 100).toFixed(1) : '0';
+        const errorPercent = processedTotal > 0 ? ((stats.errors / processedTotal) * 100).toFixed(1) : '0';
+        
+        // Determine status emoji based on success rate
+        const successRateNum = parseFloat(stats.successRate) || 0;
+        let statusEmoji = '🎉';
+        if (successRateNum < 50) statusEmoji = '⚠️';
+        else if (successRateNum < 80) statusEmoji = '📊';
+        else if (successRateNum < 95) statusEmoji = '✅';
+        
         const message = `
-✅ *Script Selesai*
+${statusEmoji} *SCRIPT SELESAI*
 
-📊 *Summary:*
-• Total: ${stats.total}
-• Success: ${stats.success}
-• Skipped: ${stats.skipped}
-• Errors: ${stats.errors}
-• Success Rate: ${stats.successRate}
+📊 *Overview:*
+┌─────────────────────────
+│ 📦 Total Rows: *${stats.total.toLocaleString('id-ID')}*
+│ ✅ Success: *${stats.success.toLocaleString('id-ID')}*
+│ ⏭️ Skipped: *${stats.skipped.toLocaleString('id-ID')}* (${skippedPercent}%)
+│ ❌ Errors: *${stats.errors.toLocaleString('id-ID')}* (${errorPercent}%)
+└─────────────────────────
 
-⏰ *Duration:* ${stats.duration}
+📈 *Statistics:*
+• Processed: ${processedTotal.toLocaleString('id-ID')} rows
+• Success Rate: *${stats.successRate}*
+
+⏱️ *Duration:* ${stats.duration}
+⏰ *Completed:* ${new Date().toLocaleString('id-ID')}
 `;
 
         try {
