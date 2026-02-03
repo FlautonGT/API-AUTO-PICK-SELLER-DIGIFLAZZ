@@ -428,8 +428,44 @@ const passesRatingFilter = (seller) => {
     return rating >= MIN_RATING_FILTER;
 };
 
-const filterSellers = (sellers) => {
+/**
+ * Check if description contains zona-specific text (zona 1, zona 2, etc.)
+ * This is problematic for "Umum" type products which should be national
+ * @param {string} desc - Seller description
+ * @returns {boolean} true if contains zona-specific text
+ */
+const hasZonaDescription = (desc) => {
+    if (!desc || typeof desc !== 'string') return false;
+    const descLower = desc.toLowerCase();
+    // Match "zona 1", "zona 2", "zona-1", "zona-2", "zona1", "zona2", etc.
+    // But NOT "all zona", "nasional", "semua zona"
+    const zonaPattern = /\bzona\s*[-]?\s*[1-9]\b/i;
+    const hasSpecificZona = zonaPattern.test(desc);
+    
+    // If contains "all zona", "semua zona", "nasional" - it's OK, not zona-specific
+    const isNational = /\b(all\s*zona|semua\s*zona|nasional|nationwide)\b/i.test(desc);
+    
+    return hasSpecificZona && !isNational;
+};
+
+/**
+ * Filter sellers based on various criteria
+ * @param {Array} sellers - Array of seller objects
+ * @param {Object} context - Optional context with category, type info for special filtering
+ * @param {string} context.category - Product category (e.g., "Pulsa", "Data")
+ * @param {string} context.type - Product type (e.g., "Umum", "Reguler")
+ * @returns {Array} Filtered sellers
+ */
+const filterSellers = (sellers, context = {}) => {
     const before = sellers.length;
+    const { category = '', type = '' } = context;
+    
+    // Determine if zona filter should be applied
+    // Only for Pulsa/Data category with Umum/Reguler type (national products)
+    const categoryLower = (category || '').toLowerCase();
+    const typeLower = (type || '').toLowerCase();
+    const shouldFilterZona = ['pulsa', 'data'].includes(categoryLower) && 
+                             ['umum', 'reguler', ''].includes(typeLower);
 
     // STEP 0: Basic validation filter (price must be valid and > 0)
     let filtered = sellers.filter(s => {
@@ -465,6 +501,23 @@ const filterSellers = (sellers) => {
 
     if (CONFIG.VERBOSE && beforeBlacklist !== filtered.length) {
         log(`  After blacklist filter: ${filtered.length} sellers (removed ${beforeBlacklist - filtered.length})`, 'filter');
+    }
+
+    // STEP 1.5: Zona filter (only for Pulsa/Data with Umum type)
+    // Sellers with zona-specific descriptions should be excluded for national products
+    if (shouldFilterZona) {
+        const beforeZona = filtered.length;
+        filtered = filtered.filter(s => {
+            const hasZona = hasZonaDescription(s.deskripsi);
+            if (hasZona && CONFIG.LOG_FILTERED_SELLERS) {
+                log(`   ❌ Zona-specific: ${s.seller} (desc: "${(s.deskripsi || '').substring(0, 40)}...")`, 'warning');
+            }
+            return !hasZona;
+        });
+
+        if (CONFIG.VERBOSE && beforeZona !== filtered.length) {
+            log(`  After zona filter: ${filtered.length} sellers (removed ${beforeZona - filtered.length})`, 'filter');
+        }
     }
 
     // STEP 2: Rating filter
@@ -509,10 +562,13 @@ const filterSellers = (sellers) => {
     // STEP 4: Fallback jika terlalu sedikit
     if (filtered.length < 3) {
         log('  ⚠️ Too few sellers after strict filter, relaxing requirements...', 'warning');
-        // Relax: filter blacklist + tetap pertahankan rating, REQUIRE_UNLIMITED_STOCK, REQUIRE_MULTI, dan REQUIRE_FP jika sudah di-set
+        // Relax: filter blacklist + zona + tetap pertahankan rating, REQUIRE_UNLIMITED_STOCK, REQUIRE_MULTI, dan REQUIRE_FP jika sudah di-set
         filtered = sellers.filter(s => {
             // Tetap filter blacklist
             if (isBlacklistedDescription(s.deskripsi)) return false;
+
+            // Tetap filter zona untuk produk nasional (Pulsa/Data dengan Type Umum)
+            if (shouldFilterZona && hasZonaDescription(s.deskripsi)) return false;
 
             // Tetap pertahankan rating filter jika ENABLE_RATING_PREFILTER = true
             if (CONFIG.ENABLE_RATING_PREFILTER) {
@@ -535,7 +591,7 @@ const filterSellers = (sellers) => {
         });
 
         if (filtered.length < 3) {
-            log('  ⚠️ Still too few, using all non-blacklisted sellers (with rating/unlimited/multi/faktur requirements)', 'warning');
+            log('  ⚠️ Still too few, using all non-blacklisted sellers (with rating/unlimited/multi/faktur/zona requirements)', 'warning');
         }
     }
 
@@ -1730,7 +1786,7 @@ const processProductGroup = async (productName, rows, brandName, categoryName) =
     }
 
     log(`  Total sellers: ${sellers.length}`, 'info');
-    sellers = filterSellers(sellers);
+    sellers = filterSellers(sellers, { category: categoryName, type: resolvedTypeName });
 
     if (sellers.length === 0) {
         log(`  No sellers after filter`, 'warning');
